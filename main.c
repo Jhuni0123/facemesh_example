@@ -2,7 +2,7 @@
 #include <nnstreamer/nnstreamer_plugin_api_decoder.h>
 #include <nnstreamer/nnstreamer_plugin_api_util.h>
 #include <nnstreamer/nnstreamer_plugin_api.h>
-#include <nnstreamer/tensor_converter_custom.h>
+#include <nnstreamer/tensor_decoder_custom.h>
 #include <nnstreamer/tensor_filter_custom_easy.h>
 #include <nnstreamer/tensor_typedef.h>
 #include <nnstreamer/nnstreamer_util.h>
@@ -245,11 +245,18 @@ crop_new_data_cb (GstElement * element, GstBuffer * buffer, AppData *app)
     GstMapInfo info;
     guint i;
     guint num_mems;
+    GstTensorMetaInfo meta;
 
     num_mems = gst_buffer_n_memory (buffer);
 
+    _print_log ("num_mems %u", num_mems);
     for (int i = 0; i < num_mems; i++) {
       mem = gst_buffer_peek_memory (buffer, 0);
+      gst_tensor_meta_info_parse_memory (&meta, mem);
+      _print_log("tensor meta info type: %d", meta.type);
+      _print_log("tensor meta info format: %d", meta.format);
+      _print_log("tensor meta info media_type: %d", meta.media_type);
+      _print_log("tensor meta info dimension: %d:%d:%d", meta.dimension[0], meta.dimension[1], meta.dimension[2]);
       if (gst_memory_map (mem, &info, GST_MAP_READ)) {
         /* check data (info.data, info.size) */
         _print_log ("received %zd", info.size);
@@ -257,109 +264,19 @@ crop_new_data_cb (GstElement * element, GstBuffer * buffer, AppData *app)
       }
     }
   }
-}
-
-/**
- * @brief Callback for signal new-data.
- */
-static void
-detect_new_data_cb (GstElement * element, GstBuffer * buffer, AppData *app)
-{
-  gsize raw_boxes_size, raw_scores_size;
-  float *raw_boxes, *raw_scores;
-  BlazeFaceInfo *info = &app->detect_model;
-
-  app->detect_received++;
-  if (app->detect_received % 90 == 1) {
-    _print_log ("DETECT::receiving new data [%d]", app->detect_received);
-  }
 
   {
-    GstMemory *mem;
-    GstMapInfo info;
-    guint i;
-    guint num_mems;
+    GstPad *sink_pad;
+    GstCaps *caps;
 
-    num_mems = gst_buffer_n_memory (buffer);
-    g_assert (num_mems == 2);
+    sink_pad = gst_element_get_static_pad (element, "sink");
 
-    mem = gst_buffer_peek_memory (buffer, 0);
-    if (gst_memory_map (mem, &info, GST_MAP_READ)) {
-      /* check data (info.data, info.size) */
-      raw_boxes = (float *) info.data;
-      raw_boxes_size = info.size / sizeof (float);
+    if (sink_pad) {
+      caps = gst_pad_get_current_caps (sink_pad);
 
-      gst_memory_unmap (mem, &info);
-    }
-
-    mem = gst_buffer_peek_memory (buffer, 1);
-    if (gst_memory_map (mem, &info, GST_MAP_READ)) {
-      /* check data (info.data, info.size) */
-      raw_scores = (float *) info.data;
-      raw_scores_size = info.size / sizeof (float);
-
-      gst_memory_unmap (mem, &info);
-    }
-  }
-
-  g_assert (raw_boxes_size == info->num_boxes * BLAZEFACE_NUM_COORD);
-  g_assert (raw_scores_size == info->num_boxes * 1);
-
-  {
-    GArray *results = g_array_sized_new (FALSE, TRUE, sizeof (detectedObject), 100);
-    for (guint i = 0; i < info->num_boxes; i++) {
-      detectedObject object = {.valid = FALSE, .class_id = 0, .x = 0, .y = 0, .width = 0, .height = 0, .prob = 0};
-
-      get_detected_object_i (i, raw_boxes, raw_scores, info, &object);
-
-      if (object.valid) {
-        g_array_append_val (results, object);
-      }
-    }
-
-    nms (results, info->iou_thresh);
-
-    /* push buffer */
-    {
-      GstBuffer *ib = gst_buffer_new ();
-      GstMemory *mem;
-      GstTensorMetaInfo meta;
-      guint *info_data;
-      guint info_size;
-      GstFlowReturn ret;
-
-      gst_tensor_meta_info_init (&meta);
-      meta.type = _NNS_UINT32;
-      meta.dimension[0] = 4U;
-      meta.dimension[1] = 1U;
-      meta.format = _NNS_TENSOR_FORMAT_FLEXIBLE;
-      info_size = sizeof (guint) * 4U;
-      info_data = g_malloc0 (info_size);
-
-      if (results->len == 0) {
-        _print_log ("no detected object");
-        info_data[0] = 0U;
-        info_data[1] = 0U;
-        info_data[2] = info->i_width;
-        info_data[3] = info->i_height;
-      } else {
-        detectedObject *object = &g_array_index (results, detectedObject, 0);
-        _print_log ("detected: %d %d %d %d", object->x, object->y, object->height, object->width);
-        info_data[0] = object->x;
-        info_data[1] = object->y;
-        info_data[2] = object->width;
-        info_data[3] = object->height;
-      }
-
-      mem = gst_memory_new_wrapped (GST_MEMORY_FLAG_READONLY, info_data, info_size, 0, info_size, NULL, NULL);
-      gst_buffer_append_memory (ib, gst_tensor_meta_info_append_header (&meta, mem));
-      gst_memory_unref (mem);
-
-      //g_signal_emit_by_name (app->crop_src, "push-buffer", ib, &ret);
-      gst_buffer_unref (ib);
-
-      if (ret != GST_FLOW_OK) {
-        _print_log ("ERROR OCCURED");
+      if (caps) {
+        _parse_caps (caps);
+        gst_caps_unref (caps);
       }
     }
   }
@@ -371,9 +288,11 @@ build_pipeline (AppData *app)
   GstElement *video_source, *video_convert1, *filter1, *video_crop;
   GstElement *video_convert2, *video_sink;
   GstElement *video_scale1, *filter2, *tensor_converter, *tensor_transform, *tensor_filter, *custom_filter_detection;
-  GstElement *tensor_converter_crop, *tensor_crop, *video_scale2;
+  GstElement *tensor_converter_crop, *tensor_crop;
   GstElement *tee, *queue_crop, *queue_detect, *queue_result;
   GstElement *crop_sink;
+  GstElement *tensor_decoder_video;
+  GstElement *video_scale_crop, *video_convert_crop, *video_sink_crop;
 
   app->pipeline = gst_pipeline_new ("face-crop-pipeline");
 
@@ -398,9 +317,11 @@ build_pipeline (AppData *app)
   queue_crop = gst_element_factory_make ("queue", "queue_crop");
   tensor_converter_crop = gst_element_factory_make ("tensor_converter", "tensor_converter_crop");
   tensor_crop = gst_element_factory_make ("tensor_crop", "tensor_crop");
-  //tensor_decoder_video = gst_element_factory_make ("tensor_decoder", "tensor_decoder_video");
-  //video_scale2 = gst_element_factory_make ("videoscale", "video_scale2");
   crop_sink = gst_element_factory_make ("tensor_sink", "crop_sink");
+  //tensor_decoder_video = gst_element_factory_make ("tensor_decoder", "tensor_decoder_video");
+  //video_scale_crop = gst_element_factory_make ("videoscale", "video_scale_crop");
+  //video_convert_crop = gst_element_factory_make ("videoconvert", "video_convert_crop");
+  //video_sink_crop = gst_element_factory_make ("autovideosink", "video_sink_crop");
 
 
   /* Result */
@@ -409,8 +330,9 @@ build_pipeline (AppData *app)
   video_sink = gst_element_factory_make ("autovideosink", "video_sink");
 
   if (!app->pipeline || !video_source || !video_convert1 || !filter1 || !video_crop || !tee
-      || !queue_crop || !tensor_converter_crop || !tensor_crop //|| !tensor_decoder_video || !video_scale2
+      || !queue_crop || !tensor_converter_crop || !tensor_crop
       || !queue_result || !video_convert2 || !video_sink
+      //|| !tensor_decoder_video || !video_scale_crop || !video_convert_crop || !video_sink_crop
       || !crop_sink
       || !queue_detect || !video_scale1 || !filter2 || !tensor_converter || !tensor_transform || !tensor_filter || !custom_filter_detection) {
     g_printerr ("Not all elements could be created.\n");
@@ -443,6 +365,7 @@ build_pipeline (AppData *app)
   /* Link all "Always" pads */
   gst_bin_add_many (GST_BIN (app->pipeline), video_source, video_convert1, filter1, video_crop, tee,
       queue_crop, tensor_converter_crop, tensor_crop,
+      //tensor_decoder_video, video_scale_crop, video_convert_crop, video_sink_crop,
       crop_sink,
       queue_result, video_convert2, video_sink,
       queue_detect, video_scale1, filter2, tensor_converter, tensor_transform, tensor_filter, custom_filter_detection, NULL);
@@ -452,6 +375,7 @@ build_pipeline (AppData *app)
       || !gst_element_link_many (queue_crop, tensor_converter_crop, NULL)
       || !gst_element_link_pads (tensor_converter_crop, "src", tensor_crop, "raw")
       || !gst_element_link_pads (custom_filter_detection, "src", tensor_crop, "info")
+      //|| !gst_element_link_many (tensor_crop, tensor_decoder_video, video_scale_crop, video_convert_crop, video_sink_crop, NULL)
       || !gst_element_link_many (tensor_crop, crop_sink, NULL)
       || !gst_element_link_many (queue_result, video_convert2, video_sink, NULL)
   ) {
@@ -600,6 +524,21 @@ init_blazeface (BlazeFaceInfo *info, const gchar *path)
   return TRUE;
 }
 
+static void
+margin_object(detectedObject *orig, detectedObject *margined, float margin_rate)
+{
+  int height = orig->height;
+  int width = orig->width;
+  int orig_size = MAX(height, width);
+  int margin = orig_size * margin_rate;
+  int size = MIN(orig_size + margin * 2, 720);
+  int x = MIN(MAX(orig->x - margin, 0), 720 - size);
+  int y = MIN(MAX(orig->y - margin, 0), 720 - size);
+  margined->x = x;
+  margined->y = y;
+  margined->width = size;
+  margined->height = size;
+}
 
 /**
  * @brief In-Code Test Function for custom-easy filter
@@ -635,12 +574,23 @@ cef_func_detection_to_cropinfo (void *private_data, const GstTensorFilterPropert
     info_data[3] = info->i_height;
   } else {
     detectedObject *object = &g_array_index (results, detectedObject, 0);
-    _print_log ("detected: %d %d %d %d", object->x, object->y, object->height, object->width);
-    info_data[0] = object->x;
-    info_data[1] = object->y;
-    info_data[2] = object->width;
-    info_data[3] = object->height;
+    detectedObject margined;
+
+    margin_object (object, &margined, 0.25);
+    //_print_log ("detected: %d %d %d %d = %d", object->x, object->y, object->height, object->width, object->height * object->width * 3);
+    _print_log ("detected: %d %d %d %d = %d", margined.x, margined.y, margined.height, margined.width, margined.height * margined.width * 3);
+
+    info_data[0] = margined.x;
+    info_data[1] = margined.y;
+    info_data[2] = margined.width;
+    info_data[3] = margined.height;
   }
+  return 0;
+}
+
+int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConfig *config, void *data, GstBuffer *out_buf) {
+  AppData *app = data;
+
   return 0;
 }
 
@@ -658,6 +608,7 @@ init_app (AppData *app)
   GstTensorsInfo info_in;
   GstTensorsInfo info_out;
 
+  /* register custom crop_info filter */
   gst_tensors_info_init (&info_in);
   gst_tensors_info_init (&info_out);
   info_in.num_tensors = 2U;
@@ -674,6 +625,8 @@ init_app (AppData *app)
   gst_tensor_parse_dimension ("4:1", info_out.info[0].dimension);
   int ret = NNS_custom_easy_register ("detection_to_cropinfo", cef_func_detection_to_cropinfo, app, &info_in, &info_out);
 
+  /* register custom flexible tensor to video decoder */
+  nnstreamer_decoder_custom_register ("flexible_to_video", flexible_tensor_to_video, app);
   if (!build_pipeline (app)) {
     return FALSE;
   }
