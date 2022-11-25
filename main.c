@@ -3,6 +3,7 @@
 #include <nnstreamer/nnstreamer_plugin_api_util.h>
 #include <nnstreamer/nnstreamer_plugin_api.h>
 #include <nnstreamer/tensor_decoder_custom.h>
+#include <nnstreamer/tensor_filter_custom.h>
 #include <nnstreamer/tensor_filter_custom_easy.h>
 #include <nnstreamer/tensor_typedef.h>
 #include <nnstreamer/nnstreamer_util.h>
@@ -293,6 +294,8 @@ build_pipeline (AppData *app)
   GstElement *crop_sink;
   GstElement *tensor_decoder_video;
   GstElement *video_scale_crop, *video_convert_crop, *video_sink_crop;
+  GstElement *flexible_to_video;
+  GstElement *fake_sink;
 
   app->pipeline = gst_pipeline_new ("face-crop-pipeline");
 
@@ -317,12 +320,11 @@ build_pipeline (AppData *app)
   queue_crop = gst_element_factory_make ("queue", "queue_crop");
   tensor_converter_crop = gst_element_factory_make ("tensor_converter", "tensor_converter_crop");
   tensor_crop = gst_element_factory_make ("tensor_crop", "tensor_crop");
-  crop_sink = gst_element_factory_make ("tensor_sink", "crop_sink");
-  //tensor_decoder_video = gst_element_factory_make ("tensor_decoder", "tensor_decoder_video");
-  //video_scale_crop = gst_element_factory_make ("videoscale", "video_scale_crop");
-  //video_convert_crop = gst_element_factory_make ("videoconvert", "video_convert_crop");
-  //video_sink_crop = gst_element_factory_make ("autovideosink", "video_sink_crop");
-
+  flexible_to_video = gst_element_factory_make ("tensor_decoder", "flexible_to_video");
+  video_convert_crop = gst_element_factory_make ("videoconvert", "video_convert_crop");
+  video_sink_crop = gst_element_factory_make ("autovideosink", "video_sink_crop");
+  fake_sink = gst_element_factory_make ("fakesink", "fake_sink");
+  //crop_sink = gst_element_factory_make ("tensor_sink", "crop_sink");
 
   /* Result */
   queue_result = gst_element_factory_make ("queue", "queue_result");
@@ -332,15 +334,16 @@ build_pipeline (AppData *app)
   if (!app->pipeline || !video_source || !video_convert1 || !filter1 || !video_crop || !tee
       || !queue_crop || !tensor_converter_crop || !tensor_crop
       || !queue_result || !video_convert2 || !video_sink
-      //|| !tensor_decoder_video || !video_scale_crop || !video_convert_crop || !video_sink_crop
-      || !crop_sink
+      || !video_convert_crop || !video_sink_crop
+      || !flexible_to_video //|| !fake_sink
+      //|| !crop_sink
       || !queue_detect || !video_scale1 || !filter2 || !tensor_converter || !tensor_transform || !tensor_filter || !custom_filter_detection) {
     g_printerr ("Not all elements could be created.\n");
     return FALSE;
   }
 
   /* Set properties */
-  GstCaps *convert_caps, *scale_caps;
+  GstCaps *convert_caps, *scale_caps, *cropped_video;
 
   convert_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=1280,height=720,framerate=30/1");
   g_object_set (G_OBJECT (filter1), "caps", convert_caps, NULL);
@@ -357,7 +360,9 @@ build_pipeline (AppData *app)
   g_object_set (tensor_filter, "framework", "tensorflow-lite", "model", app->detect_model.model_path, NULL);
   g_object_set (custom_filter_detection, "framework", "custom-easy", "model", "detection_to_cropinfo", NULL);
 
-  g_signal_connect (crop_sink, "new-data", (GCallback) crop_new_data_cb, app);
+  //g_signal_connect (crop_sink, "new-data", (GCallback) crop_new_data_cb, app);
+
+  g_object_set (flexible_to_video, "mode", "custom-code", "option1", "flexible_to_video", NULL);
 
   //g_object_set (tensor_decoder_video, "mode", "direct_video", NULL);
 
@@ -365,24 +370,31 @@ build_pipeline (AppData *app)
   /* Link all "Always" pads */
   gst_bin_add_many (GST_BIN (app->pipeline), video_source, video_convert1, filter1, video_crop, tee,
       queue_crop, tensor_converter_crop, tensor_crop,
-      //tensor_decoder_video, video_scale_crop, video_convert_crop, video_sink_crop,
-      crop_sink,
+      video_convert_crop, video_sink_crop,
+      //crop_sink,
+      flexible_to_video,// fake_sink,
       queue_result, video_convert2, video_sink,
       queue_detect, video_scale1, filter2, tensor_converter, tensor_transform, tensor_filter, custom_filter_detection, NULL);
+
+  cropped_video = gst_caps_from_string ("video/x-raw,format=RGB,width=192,height=192,framerate=30/1");
 
   if (!gst_element_link_many (video_source, video_convert1, filter1, video_crop, tee, NULL)
       || !gst_element_link_many (queue_detect, video_scale1, filter2, tensor_converter, tensor_transform, tensor_filter, custom_filter_detection, NULL)
       || !gst_element_link_many (queue_crop, tensor_converter_crop, NULL)
       || !gst_element_link_pads (tensor_converter_crop, "src", tensor_crop, "raw")
       || !gst_element_link_pads (custom_filter_detection, "src", tensor_crop, "info")
-      //|| !gst_element_link_many (tensor_crop, tensor_decoder_video, video_scale_crop, video_convert_crop, video_sink_crop, NULL)
-      || !gst_element_link_many (tensor_crop, crop_sink, NULL)
+      || !gst_element_link_many (tensor_crop, flexible_to_video, NULL)
+      //|| !gst_element_link_filtered (flexible_to_video, fake_sink, cropped_video)
+      || !gst_element_link_filtered (flexible_to_video, video_convert_crop, cropped_video)
+      || !gst_element_link_many (video_convert_crop, video_sink_crop, NULL)
+      //|| !gst_element_link_many (tensor_crop, crop_sink, NULL)
       || !gst_element_link_many (queue_result, video_convert2, video_sink, NULL)
   ) {
     g_printerr ("Elements could not be linked.\n");
     gst_object_unref (app->pipeline);
     return FALSE;
   }
+  gst_caps_unref (cropped_video);
 
   /* Link tee's "Request" pads */
   GstPad *tee_detect_pad, *tee_crop_pad, *tee_result_pad;
@@ -412,6 +424,7 @@ build_pipeline (AppData *app)
   gst_object_unref (queue_detect_pad);
   gst_object_unref (queue_result_pad);
 
+  GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN (app->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "pipeline");
   return TRUE;
 }
 
@@ -588,10 +601,92 @@ cef_func_detection_to_cropinfo (void *private_data, const GstTensorFilterPropert
   return 0;
 }
 
+static size_t
+_get_video_xraw_RGB_bufsize (size_t width, size_t height)
+{
+  return (size_t)((3 * width - 1) / 4 + 1) * 4 * height;
+}
+
 int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConfig *config, void *data, GstBuffer *out_buf) {
   AppData *app = data;
+  GstMapInfo out_info;
+  GstMemory *out_mem;
+  GstTensorMetaInfo meta;
+  gsize hsize, dsize, esize;
+  const GstTensorMemory *tmem = &input[0];
+  gboolean need_alloc;
 
-  return 0;
+  g_assert (gst_tensors_config_is_flexible(config));
+  g_assert (config->info.num_tensors >= 1);
+
+  if (!gst_tensor_meta_info_parse_header (&meta, (gpointer) tmem->data)) {
+    GST_ERROR ("Invalid tensor meta info.");
+    return GST_FLOW_ERROR;
+  }
+
+  hsize = gst_tensor_meta_info_get_header_size (&meta);
+  dsize = gst_tensor_meta_info_get_data_size (&meta);
+  esize = gst_tensor_get_element_size (meta.type);
+
+  _print_log ("size: %zd %zd %zd", hsize, dsize, esize);
+  g_assert (1 == esize);
+
+  if (hsize + dsize != tmem->size) {
+    GST_ERROR ("Invalid tensor meta info.");
+    return GST_FLOW_ERROR;
+  }
+
+  const uint32_t *dim = &meta.dimension[0];
+  g_assert (3 == dim[0]);
+  g_assert (dim[1] == dim[2]);
+
+  size_t size = _get_video_xraw_RGB_bufsize (192, 192);
+
+  need_alloc = (gst_buffer_get_size (out_buf) == 0);
+
+  if (need_alloc) {
+    out_mem = gst_allocator_alloc (NULL, size, NULL);
+  } else {
+    if (gst_buffer_get_size (out_buf)) {
+      gst_buffer_set_size (out_buf, size);
+    }
+    out_mem = gst_buffer_get_all_memory (out_buf);
+  }
+
+  if (!gst_memory_map (out_mem, &out_info, GST_MAP_WRITE)) {
+    gst_memory_unref (out_mem);
+    return GST_FLOW_ERROR;
+  }
+  
+  // fill out_info.data
+  //memset (out_info.data, 0xFF0000FF, size);
+  int h, w, c;
+  uint8_t *ptr = (uint8_t *)out_info.data;
+  uint8_t *inp = (uint8_t *)tmem->data + hsize;
+  for (h = 0; h < 192; h++) {
+    int h_inp = (int)((float)dim[2] / 192 * h);
+    uint8_t *row_inp = inp + dim[0] * dim[1] * h_inp;
+    uint8_t *row_ptr = ptr;
+    for (w = 0; w < 192; w++) {
+      int w_inp = (int)((float)dim[1] / 192 * w);
+      uint8_t *pix_inp = row_inp + dim[0] * w_inp;
+      for (c = 0; c < 3; c++) {
+        *row_ptr = *(pix_inp + c);
+        row_ptr += 1;
+      }
+    }
+    ptr += ((3 * 192 - 1) / 4 + 1) * 4;
+  }
+
+  gst_memory_unmap (out_mem, &out_info);
+
+  if (need_alloc) {
+    gst_buffer_append_memory (out_buf, out_mem);
+  } else {
+    gst_memory_unref (out_mem);
+  }
+
+  return GST_FLOW_OK;
 }
 
 gboolean 
@@ -627,6 +722,7 @@ init_app (AppData *app)
 
   /* register custom flexible tensor to video decoder */
   nnstreamer_decoder_custom_register ("flexible_to_video", flexible_tensor_to_video, app);
+
   if (!build_pipeline (app)) {
     return FALSE;
   }
