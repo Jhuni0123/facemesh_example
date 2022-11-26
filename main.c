@@ -79,19 +79,30 @@ typedef struct
   gfloat iou_thresh;
 } BlazeFaceInfo;
 
+typedef struct
+{
+  gchar *model_path;
+
+  guint tensor_width;
+  guint tensor_height;
+
+  guint i_width;
+  guint i_height;
+} LandmarkModelInfo;
+
 /**
  * @brief Data structure for app.
  */
 typedef struct
 {
   BlazeFaceInfo detect_model;
+  LandmarkModelInfo landmark_model;
 
   GstElement *pipeline; /**< gst pipeline for data stream */
 
   GMainLoop *loop; /**< main event loop */
   GstBus *bus; /**< gst bus for data pipeline */
 
-  guint detect_received;
   guint crop_received;
 } AppData;
 
@@ -286,143 +297,262 @@ crop_new_data_cb (GstElement * element, GstBuffer * buffer, AppData *app)
 gboolean
 build_pipeline (AppData *app)
 {
-  GstElement *video_source, *video_convert1, *filter1, *video_crop;
-  GstElement *video_convert2, *video_sink;
-  GstElement *video_scale1, *filter2, *tensor_converter, *tensor_transform, *tensor_filter, *custom_filter_detection;
-  GstElement *tensor_converter_crop, *tensor_crop;
-  GstElement *tee, *queue_crop, *queue_detect, *queue_result;
-  GstElement *crop_sink;
-  GstElement *tensor_decoder_video;
-  GstElement *video_scale_crop, *video_convert_crop, *video_sink_crop;
-  GstElement *flexible_to_video;
-  GstElement *fake_sink;
+  GstElement *tee_source, *compositor;
+  GstPad *cropinfo_srcpad, *cropped_video_srcpad, *landmark_overray_srcpad;
 
-  app->pipeline = gst_pipeline_new ("face-crop-pipeline");
+  app->pipeline = gst_pipeline_new ("facemesh-pipeline");
+  if (!app->pipeline) {
+    g_printerr ("pipeline could not be created.\n");
+    return FALSE;
+  }
 
-  /* Source video */
-  video_source = gst_element_factory_make ("v4l2src", "video_source");
-  video_convert1 = gst_element_factory_make ("videoconvert", "video_convert1");
-  filter1 = gst_element_factory_make ("capsfilter", "filter1");
-  video_crop = gst_element_factory_make ("videocrop", "video_crop");
+  /* Souece video */
+  {
+    GstElement *video_source, *convert_source, *filter, *crop_source;
+    GstCaps *convert_caps;
 
-  tee = gst_element_factory_make ("tee", "tee");
+    video_source = gst_element_factory_make ("v4l2src", "video_source");
+    convert_source = gst_element_factory_make ("videoconvert", "convert_source");
+    filter = gst_element_factory_make ("capsfilter", "filter1");
+    crop_source = gst_element_factory_make ("videocrop", "crop_source");
+    tee_source = gst_element_factory_make ("tee", "tee_source");
 
-  /* Face Detect */
-  queue_detect = gst_element_factory_make ("queue", "queue_detect");
-  video_scale1 = gst_element_factory_make ("videoscale", "video_scale1");
-  filter2 = gst_element_factory_make ("capsfilter", "filter2");
-  tensor_converter = gst_element_factory_make ("tensor_converter", "tensor_converter");
-  tensor_transform = gst_element_factory_make ("tensor_transform", "tensor_transform");
-  tensor_filter = gst_element_factory_make ("tensor_filter", "tensor_filter");
-  custom_filter_detection = gst_element_factory_make ("tensor_filter", "custom_filter_detection");
+    if (!video_source || !convert_source || !filter || !crop_source || !tee_source) {
+      g_printerr ("[SOUECE] Not all elements could be created.\n");
+      return FALSE;
+    }
+
+    convert_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=1280,height=720,framerate=30/1");
+    g_object_set (G_OBJECT (filter), "caps", convert_caps, NULL);
+    gst_caps_unref (convert_caps);
+
+    g_object_set (crop_source, "left", 280, "right", 280, NULL);
+
+    gst_bin_add_many (GST_BIN (app->pipeline), video_source, convert_source, filter, crop_source, tee_source, NULL);
+    if (!gst_element_link_many (video_source, convert_source, filter, crop_source, tee_source, NULL)) {
+      g_printerr ("[SOURCE] Elements could not be linked.\n");
+      gst_object_unref (app->pipeline);
+      return FALSE;
+    }
+
+  }
+
+  /* Face Detection to Crop */
+  {
+    GstElement *queue;
+    GstElement *scale, *filter, *tconv, *ttransform, *tfilter_detect, *tfilter_cropinfo;
+    GstCaps *scale_caps;
+    GstPad *tee_pad, *queue_pad;
+
+    queue = gst_element_factory_make ("queue", "queue_detect");
+    scale = gst_element_factory_make ("videoscale", "scale_detect");
+    filter = gst_element_factory_make ("capsfilter", "filter_detect");
+    tconv = gst_element_factory_make ("tensor_converter", "tconv_detect");
+    ttransform = gst_element_factory_make ("tensor_transform", "ttransform_detect");
+    tfilter_detect = gst_element_factory_make ("tensor_filter", "tfilter_detect");
+    tfilter_cropinfo = gst_element_factory_make ("tensor_filter", "filter_cropinfo");
+
+    if (!queue || !scale || !filter || !tconv || !ttransform || !tfilter_detect || !tfilter_cropinfo) {
+      g_printerr ("[DETECT] Not all elements could be created.\n");
+      return FALSE;
+    }
+
+    scale_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=128,height=128");
+    g_object_set (G_OBJECT (filter), "caps", scale_caps, NULL);
+    gst_caps_unref (scale_caps);
+
+    g_object_set (ttransform, "mode", 2 /* GTT_ARITHMETIC */, "option", "typecast:float32,add:-127.5,div:127.5", NULL);
+    g_object_set (tfilter_detect, "framework", "tensorflow-lite", "model", app->detect_model.model_path, NULL);
+    g_object_set (tfilter_cropinfo, "framework", "custom-easy", "model", "detection_to_cropinfo", NULL);
+
+    gst_bin_add_many (GST_BIN (app->pipeline), 
+        queue, scale, filter, tconv, ttransform, tfilter_detect, tfilter_cropinfo, NULL);
+
+    if (!gst_element_link_many (queue, scale, filter, tconv, ttransform, tfilter_detect, tfilter_cropinfo, NULL)) {
+      g_printerr ("[DETECT] Elements could not be linked.\n");
+      gst_object_unref (app->pipeline);
+      return FALSE;
+    }
+
+    tee_pad = gst_element_request_pad_simple (tee_source, "src_%u");
+    g_print ("[DETECT] Obtained request pad %s\n", gst_pad_get_name (tee_pad));
+    queue_pad = gst_element_get_static_pad (queue, "sink");
+
+    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK) {
+      g_printerr ("[DETECT] Tee could not be linked\n");
+      gst_object_unref (app->pipeline);
+      return FALSE;
+    }
+    gst_object_unref (queue_pad);
+
+    cropinfo_srcpad = gst_element_get_static_pad (tfilter_cropinfo, "src");
+  }
 
   /* Crop video */
-  queue_crop = gst_element_factory_make ("queue", "queue_crop");
-  tensor_converter_crop = gst_element_factory_make ("tensor_converter", "tensor_converter_crop");
-  tensor_crop = gst_element_factory_make ("tensor_crop", "tensor_crop");
-  flexible_to_video = gst_element_factory_make ("tensor_decoder", "flexible_to_video");
-  video_convert_crop = gst_element_factory_make ("videoconvert", "video_convert_crop");
-  video_sink_crop = gst_element_factory_make ("autovideosink", "video_sink_crop");
-  fake_sink = gst_element_factory_make ("fakesink", "fake_sink");
-  //crop_sink = gst_element_factory_make ("tensor_sink", "crop_sink");
+  {
+    GstElement *queue, *tconv, *tcrop;
+    GstPad *cropinfo_sinkpad, *tee_pad, *queue_pad;
 
-  /* Result */
-  queue_result = gst_element_factory_make ("queue", "queue_result");
-  video_convert2 = gst_element_factory_make ("videoconvert", "video_convert2");
-  video_sink = gst_element_factory_make ("autovideosink", "video_sink");
+    queue = gst_element_factory_make ("queue", "queue_crop");
+    tconv = gst_element_factory_make ("tensor_converter", "tconv_crop");
+    tcrop = gst_element_factory_make ("tensor_crop", "tcrop");
 
-  if (!app->pipeline || !video_source || !video_convert1 || !filter1 || !video_crop || !tee
-      || !queue_crop || !tensor_converter_crop || !tensor_crop
-      || !queue_result || !video_convert2 || !video_sink
-      || !video_convert_crop || !video_sink_crop
-      || !flexible_to_video //|| !fake_sink
-      //|| !crop_sink
-      || !queue_detect || !video_scale1 || !filter2 || !tensor_converter || !tensor_transform || !tensor_filter || !custom_filter_detection) {
-    g_printerr ("Not all elements could be created.\n");
-    return FALSE;
+    if (!queue || !tconv || !tcrop) {
+      g_printerr ("[CROP] Not all elements could be created.\n");
+      return FALSE;
+    }
+
+    gst_bin_add_many (GST_BIN (app->pipeline), queue, tconv, tcrop, NULL);
+
+    cropinfo_sinkpad = gst_element_get_static_pad (tcrop, "info");
+    if (!gst_element_link_many (queue, tconv, NULL)
+        || !gst_element_link_pads (tconv, "src", tcrop, "raw")
+        || gst_pad_link (cropinfo_srcpad, cropinfo_sinkpad) != GST_PAD_LINK_OK) {
+      g_printerr ("[CROP] Elements could not be linked.\n");
+      gst_object_unref (app->pipeline);
+      return FALSE;
+    }
+
+    tee_pad = gst_element_request_pad_simple (tee_source, "src_%u");
+    g_print ("[CROP] Obtained request pad %s\n", gst_pad_get_name (tee_pad));
+    queue_pad = gst_element_get_static_pad (queue, "sink");
+
+    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK) {
+      g_printerr ("[CROP] Tee could not be linked\n");
+      gst_object_unref (app->pipeline);
+      return FALSE;
+    }
+    gst_object_unref (queue_pad);
+
+    cropped_video_srcpad = gst_element_get_static_pad (tcrop, "src");
   }
 
-  /* Set properties */
-  GstCaps *convert_caps, *scale_caps, *cropped_video;
+  /* Cropped video to videosink */
+  /*
+  {
+    GstElement *tdec_flexible, *convert_crop, *video_sink_crop;
+    GstPad *cropped_video_sinkpad;
+    GstCaps *cropped_video_caps;
 
-  convert_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=1280,height=720,framerate=30/1");
-  g_object_set (G_OBJECT (filter1), "caps", convert_caps, NULL);
-  gst_caps_unref (convert_caps);
+    tdec_flexible = gst_element_factory_make ("tensor_decoder", "tdec_flexible");
+    convert_crop = gst_element_factory_make ("videoconvert", "convert_crop");
+    video_sink_crop = gst_element_factory_make ("autovideosink", "video_sink_crop");
 
-  g_object_set (video_crop, "left", 280, "right", 280, NULL);
+    if (!tdec_flexible || !convert_crop || !video_sink_crop) {
+      g_printerr ("[CROPPED VIDEO] Not all elements could be created.\n");
+      return FALSE;
+    }
 
-  scale_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=128,height=128");
-  g_object_set (G_OBJECT (filter2), "caps", scale_caps, NULL);
-  gst_caps_unref (scale_caps);
+    g_object_set (tdec_flexible, "mode", "custom-code", "option1", "flexible_to_video", NULL);
 
-  g_object_set (tensor_transform, "mode", 2 /* GTT_ARITHMETIC */, "option", "typecast:float32,add:-127.5,div:127.5", NULL);
+    gst_bin_add_many (GST_BIN (app->pipeline), tdec_flexible, convert_crop, video_sink_crop, NULL);
 
-  g_object_set (tensor_filter, "framework", "tensorflow-lite", "model", app->detect_model.model_path, NULL);
-  g_object_set (custom_filter_detection, "framework", "custom-easy", "model", "detection_to_cropinfo", NULL);
-
-  //g_signal_connect (crop_sink, "new-data", (GCallback) crop_new_data_cb, app);
-
-  g_object_set (flexible_to_video, "mode", "custom-code", "option1", "flexible_to_video", NULL);
-
-  //g_object_set (tensor_decoder_video, "mode", "direct_video", NULL);
-
-
-  /* Link all "Always" pads */
-  gst_bin_add_many (GST_BIN (app->pipeline), video_source, video_convert1, filter1, video_crop, tee,
-      queue_crop, tensor_converter_crop, tensor_crop,
-      video_convert_crop, video_sink_crop,
-      //crop_sink,
-      flexible_to_video,// fake_sink,
-      queue_result, video_convert2, video_sink,
-      queue_detect, video_scale1, filter2, tensor_converter, tensor_transform, tensor_filter, custom_filter_detection, NULL);
-
-  cropped_video = gst_caps_from_string ("video/x-raw,format=RGB,width=192,height=192,framerate=30/1");
-
-  if (!gst_element_link_many (video_source, video_convert1, filter1, video_crop, tee, NULL)
-      || !gst_element_link_many (queue_detect, video_scale1, filter2, tensor_converter, tensor_transform, tensor_filter, custom_filter_detection, NULL)
-      || !gst_element_link_many (queue_crop, tensor_converter_crop, NULL)
-      || !gst_element_link_pads (tensor_converter_crop, "src", tensor_crop, "raw")
-      || !gst_element_link_pads (custom_filter_detection, "src", tensor_crop, "info")
-      || !gst_element_link_many (tensor_crop, flexible_to_video, NULL)
-      //|| !gst_element_link_filtered (flexible_to_video, fake_sink, cropped_video)
-      || !gst_element_link_filtered (flexible_to_video, video_convert_crop, cropped_video)
-      || !gst_element_link_many (video_convert_crop, video_sink_crop, NULL)
-      //|| !gst_element_link_many (tensor_crop, crop_sink, NULL)
-      || !gst_element_link_many (queue_result, video_convert2, video_sink, NULL)
-  ) {
-    g_printerr ("Elements could not be linked.\n");
-    gst_object_unref (app->pipeline);
-    return FALSE;
+    cropped_video_sinkpad = gst_element_get_static_pad (tdec_flexible, "sink");
+    cropped_video_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=192,height=192,framerate=30/1");
+    if (gst_pad_link (cropped_video_srcpad, cropped_video_sinkpad) != GST_PAD_LINK_OK
+        || !gst_element_link_filtered (tdec_flexible, convert_crop, cropped_video_caps)
+        || !gst_element_link_many (convert_crop, video_sink_crop, NULL)
+    ) {
+      g_printerr ("[CROPPED VIDEO] Elements could not be linked.\n");
+      gst_object_unref (app->pipeline);
+      return FALSE;
+    }
+    gst_caps_unref (cropped_video_caps);
   }
-  gst_caps_unref (cropped_video);
+  */
 
-  /* Link tee's "Request" pads */
-  GstPad *tee_detect_pad, *tee_crop_pad, *tee_result_pad;
-  GstPad *queue_detect_pad, *queue_crop_pad, *queue_result_pad;
+  /* Face Landmark */
+  {
+    GstElement *tdec_flexible, *tconv, *ttransform, *tfilter_landmark, *tdec_landmark;
+    GstPad *cropped_video_sinkpad;
+    GstCaps *cropped_video_caps;
 
-  tee_crop_pad = gst_element_request_pad_simple (tee, "src_%u");
-  g_print ("Obtained request pad %s for crop branch.\n", gst_pad_get_name (tee_crop_pad));
-  queue_crop_pad = gst_element_get_static_pad (queue_crop, "sink");
+    tdec_flexible = gst_element_factory_make ("tensor_decoder", "tdec_flexible");
+    tconv = gst_element_factory_make ("tensor_converter", "tconv_landmark");
+    ttransform = gst_element_factory_make ("tensor_transform", "ttransform_landmark");
+    tfilter_landmark = gst_element_factory_make ("tensor_filter", "tfilter_landmark");
+    tdec_landmark = gst_element_factory_make ("tensor_decoder", "tdec_landmark");
 
-  tee_detect_pad = gst_element_request_pad_simple (tee, "src_%u");
-  g_print ("Obtained request pad %s for detect branch.\n", gst_pad_get_name (tee_detect_pad));
-  queue_detect_pad = gst_element_get_static_pad (queue_detect, "sink");
+    if (!tdec_flexible || !tconv || !ttransform || !tfilter_landmark || !tdec_landmark) {
+      g_printerr ("[LANDMARK] Not all elements could be created.\n");
+      return FALSE;
+    }
 
-  tee_result_pad = gst_element_request_pad_simple (tee, "src_%u");
-  g_print ("Obtained request pad %s for result branch.\n", gst_pad_get_name (tee_result_pad));
-  queue_result_pad = gst_element_get_static_pad (queue_result, "sink");
+    g_object_set (tdec_flexible, "mode", "custom-code", "option1", "flexible_to_video", NULL);
+    g_object_set (ttransform, "mode", 2 /* GTT_ARITHMETIC */, "option", "typecast:float32,add:-127.5,div:127.5", NULL);
+    g_object_set (tfilter_landmark, "framework", "tensorflow-lite", "model", app->landmark_model.model_path, NULL);
+    g_object_set (tdec_landmark, "mode", "face_mesh", "option1", "mediapipe-face-mesh", "option2", "720:720", "option3", "192:192", NULL);
 
-  if (gst_pad_link (tee_crop_pad, queue_crop_pad) != GST_PAD_LINK_OK
-      || gst_pad_link (tee_detect_pad, queue_detect_pad) != GST_PAD_LINK_OK
-      || gst_pad_link (tee_result_pad, queue_result_pad) != GST_PAD_LINK_OK
-  ) {
-    g_printerr ("Tee could not be linked\n");
-    gst_object_unref (app->pipeline);
-    return FALSE;
+    gst_bin_add_many (GST_BIN (app->pipeline),
+        tdec_flexible, tconv, ttransform, tfilter_landmark, tdec_landmark, NULL);
+
+    cropped_video_sinkpad = gst_element_get_static_pad (tdec_flexible, "sink");
+    cropped_video_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=192,height=192,framerate=30/1");
+    if (gst_pad_link (cropped_video_srcpad, cropped_video_sinkpad) != GST_PAD_LINK_OK
+        || !gst_element_link_filtered (tdec_flexible, tconv, cropped_video_caps)
+        || !gst_element_link_many (tconv, ttransform, tfilter_landmark, tdec_landmark, NULL))
+    {
+      g_printerr ("[LANDMARK] Elements could not be linked.\n");
+      gst_object_unref (app->pipeline);
+      return FALSE;
+    }
+
+    landmark_overray_srcpad = gst_element_get_static_pad (tdec_landmark, "src");
   }
-  gst_object_unref (queue_crop_pad);
-  gst_object_unref (queue_detect_pad);
-  gst_object_unref (queue_result_pad);
+
+  /* Result video */
+  {
+    GstElement *queue, *compositor, *convert, *video_sink;
+    GstPad *tee_pad, *queue_pad, *compositor_overray_pad, *compositor_video_pad;
+
+    queue = gst_element_factory_make ("queue", "queue_result");
+    compositor = gst_element_factory_make ("compositor", "compositor");
+    convert = gst_element_factory_make ("videoconvert", "convert_result");
+    video_sink = gst_element_factory_make ("autovideosink", "video_sink");
+
+    if (!queue || !compositor || !convert || !video_sink) {
+      g_printerr ("[RESULT] Not all elements could be created.\n");
+      return FALSE;
+    }
+
+    gst_bin_add_many (GST_BIN (app->pipeline), queue, compositor, convert, video_sink, NULL);
+    
+    if (!gst_element_link_many (compositor, convert, video_sink, NULL)) {
+      g_printerr ("[RESULT] Elements could not be linked.\n");
+      gst_object_unref (app->pipeline);
+      return FALSE;
+    }
+
+    compositor_overray_pad = gst_element_request_pad_simple (compositor, "sink_%u");
+    g_print ("[RESULT] Obtained request pad %s\n", gst_pad_get_name (compositor_overray_pad));
+    g_object_set (compositor_overray_pad, "zorder", 2, NULL);
+
+    compositor_video_pad = gst_element_request_pad_simple (compositor, "sink_%u");
+    g_print ("[RESULT] Obtained request pad %s\n", gst_pad_get_name (compositor_video_pad));
+    g_object_set (compositor_video_pad, "zorder", 1, NULL);
+    queue_pad = gst_element_get_static_pad (queue, "src");
+
+    if (gst_pad_link (landmark_overray_srcpad, compositor_overray_pad) != GST_PAD_LINK_OK
+        || gst_pad_link (queue_pad, compositor_video_pad) != GST_PAD_LINK_OK) {
+      g_printerr ("[RESULT] Compositor could not be linked\n");
+      gst_object_unref (app->pipeline);
+      return FALSE;
+    }
+    gst_object_unref (queue_pad);
+
+    tee_pad = gst_element_request_pad_simple (tee_source, "src_%u");
+    g_print ("[RESULT] Obtained request pad %s\n", gst_pad_get_name (tee_pad));
+    queue_pad = gst_element_get_static_pad (queue, "sink");
+
+    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK) {
+      g_printerr ("[RESULT] Tee could not be linked\n");
+      gst_object_unref (app->pipeline);
+      return FALSE;
+    }
+    gst_object_unref (queue_pad);
+  }
+
+  gst_object_unref (cropinfo_srcpad);
 
   GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN (app->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "pipeline");
   return TRUE;
@@ -502,41 +632,6 @@ error:
   g_free (contents);
   return !failed;
 }
-
-static gboolean
-init_blazeface (BlazeFaceInfo *info, const gchar *path)
-{
-  const gchar detect_model[] = "face_detection_short_range.tflite";
-  const gchar detect_box_prior[] = "box_prior.txt";
-  const guint num_boxs = BLAZEFACE_SHORT_RANGE_NUM_BOXS;
-
-  info->model_path = g_strdup_printf ("%s/%s", path, detect_model);
-  info->anchors_path = g_strdup_printf ("%s/%s", path, detect_box_prior);
-  info->num_boxes = num_boxs;
-  info->x_scale = 128;
-  info->y_scale = 128;
-  info->h_scale = 128;
-  info->w_scale = 128;
-  info->i_width = 720;
-  info->i_height = 720;
-  info->min_score_thresh = 0.5f;
-  info->iou_thresh = 0.3f;
-
-  if (!g_file_test (info->model_path, G_FILE_TEST_IS_REGULAR)) {
-    g_critical ("cannot find tflite model [%s]", info->model_path);
-    return FALSE;
-  }
-
-  if (!g_file_test (info->anchors_path, G_FILE_TEST_IS_REGULAR)) {
-    g_critical ("cannot find tflite box_prior [%s]", info->anchors_path);
-    return FALSE;
-  }
-
-  blazeface_load_anchors (info);
-
-  return TRUE;
-}
-
 static void
 margin_object(detectedObject *orig, detectedObject *margined, float margin_rate)
 {
@@ -591,7 +686,7 @@ cef_func_detection_to_cropinfo (void *private_data, const GstTensorFilterPropert
 
     margin_object (object, &margined, 0.25);
     //_print_log ("detected: %d %d %d %d = %d", object->x, object->y, object->height, object->width, object->height * object->width * 3);
-    _print_log ("detected: %d %d %d %d = %d", margined.x, margined.y, margined.height, margined.width, margined.height * margined.width * 3);
+    //_print_log ("detected: %d %d %d %d = %d", margined.x, margined.y, margined.height, margined.width, margined.height * margined.width * 3);
 
     info_data[0] = margined.x;
     info_data[1] = margined.y;
@@ -628,7 +723,7 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
   dsize = gst_tensor_meta_info_get_data_size (&meta);
   esize = gst_tensor_get_element_size (meta.type);
 
-  _print_log ("size: %zd %zd %zd", hsize, dsize, esize);
+  //_print_log ("size: %zd %zd %zd", hsize, dsize, esize);
   g_assert (1 == esize);
 
   if (hsize + dsize != tmem->size) {
@@ -658,9 +753,9 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
     return GST_FLOW_ERROR;
   }
   
-  // fill out_info.data
   //memset (out_info.data, 0xFF0000FF, size);
-  int h, w, c;
+  /* neareast-neighbor */
+  int h, w;
   uint8_t *ptr = (uint8_t *)out_info.data;
   uint8_t *inp = (uint8_t *)tmem->data + hsize;
   for (h = 0; h < 192; h++) {
@@ -670,10 +765,8 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
     for (w = 0; w < 192; w++) {
       int w_inp = (int)((float)dim[1] / 192 * w);
       uint8_t *pix_inp = row_inp + dim[0] * w_inp;
-      for (c = 0; c < 3; c++) {
-        *row_ptr = *(pix_inp + c);
-        row_ptr += 1;
-      }
+      memcpy (row_ptr, pix_inp, 3);
+      row_ptr += 3;
     }
     ptr += ((3 * 192 - 1) / 4 + 1) * 4;
   }
@@ -689,13 +782,66 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
   return GST_FLOW_OK;
 }
 
+static gboolean
+init_blazeface (BlazeFaceInfo *info, const gchar *path)
+{
+  const gchar detect_model[] = "face_detection_short_range.tflite";
+  const gchar detect_box_prior[] = "box_prior.txt";
+  const guint num_boxs = BLAZEFACE_SHORT_RANGE_NUM_BOXS;
+
+  info->model_path = g_strdup_printf ("%s/%s", path, detect_model);
+  info->anchors_path = g_strdup_printf ("%s/%s", path, detect_box_prior);
+  info->num_boxes = num_boxs;
+  info->x_scale = 128;
+  info->y_scale = 128;
+  info->h_scale = 128;
+  info->w_scale = 128;
+  info->i_width = 720;
+  info->i_height = 720;
+  info->min_score_thresh = 0.5f;
+  info->iou_thresh = 0.3f;
+
+  if (!g_file_test (info->model_path, G_FILE_TEST_IS_REGULAR)) {
+    g_critical ("cannot find tflite model [%s]", info->model_path);
+    return FALSE;
+  }
+
+  if (!g_file_test (info->anchors_path, G_FILE_TEST_IS_REGULAR)) {
+    g_critical ("cannot find tflite box_prior [%s]", info->anchors_path);
+    return FALSE;
+  }
+
+  blazeface_load_anchors (info);
+
+  return TRUE;
+}
+
+static gboolean
+init_landmark_model (LandmarkModelInfo *info, const gchar *path)
+{
+  const gchar landmark_model[] = "face_landmark.tflite";
+
+  info->model_path = g_strdup_printf ("%s/%s", path, landmark_model);
+  info->tensor_width = 192;
+  info->tensor_height = 192;
+  info->i_width = 720;
+  info->i_height = 720;
+
+  if (!g_file_test (info->model_path, G_FILE_TEST_IS_REGULAR)) {
+    g_critical ("cannot find tflite model [%s]", info->model_path);
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
 gboolean 
 init_app (AppData *app)
 {
   const gchar resource_path[] = "./res";
 
   init_blazeface (&app->detect_model, resource_path);
-  app->detect_received = 0;
+  init_landmark_model (&app->landmark_model, resource_path);
   app->crop_received = 0;
 
   app->loop = g_main_loop_new (NULL, FALSE);
