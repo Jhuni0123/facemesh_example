@@ -297,8 +297,8 @@ crop_new_data_cb (GstElement * element, GstBuffer * buffer, AppData *app)
 gboolean
 build_pipeline (AppData *app)
 {
-  GstElement *tee_source, *compositor;
-  GstPad *cropinfo_srcpad, *cropped_video_srcpad, *landmark_overray_srcpad;
+  GstElement *tee_source, *compositor, *tee_cropinfo;
+  GstPad *cropped_video_srcpad, *landmark_overray_srcpad;
 
   app->pipeline = gst_pipeline_new ("facemesh-pipeline");
   if (!app->pipeline) {
@@ -351,8 +351,9 @@ build_pipeline (AppData *app)
     ttransform = gst_element_factory_make ("tensor_transform", "ttransform_detect");
     tfilter_detect = gst_element_factory_make ("tensor_filter", "tfilter_detect");
     tfilter_cropinfo = gst_element_factory_make ("tensor_filter", "filter_cropinfo");
+    tee_cropinfo = gst_element_factory_make ("tee", "tee_cropinfo");
 
-    if (!queue || !scale || !filter || !tconv || !ttransform || !tfilter_detect || !tfilter_cropinfo) {
+    if (!queue || !scale || !filter || !tconv || !ttransform || !tfilter_detect || !tfilter_cropinfo || !tee_cropinfo) {
       g_printerr ("[DETECT] Not all elements could be created.\n");
       return FALSE;
     }
@@ -366,9 +367,9 @@ build_pipeline (AppData *app)
     g_object_set (tfilter_cropinfo, "framework", "custom-easy", "model", "detection_to_cropinfo", NULL);
 
     gst_bin_add_many (GST_BIN (app->pipeline), 
-        queue, scale, filter, tconv, ttransform, tfilter_detect, tfilter_cropinfo, NULL);
+        queue, scale, filter, tconv, ttransform, tfilter_detect, tfilter_cropinfo, tee_cropinfo, NULL);
 
-    if (!gst_element_link_many (queue, scale, filter, tconv, ttransform, tfilter_detect, tfilter_cropinfo, NULL)) {
+    if (!gst_element_link_many (queue, scale, filter, tconv, ttransform, tfilter_detect, tfilter_cropinfo, tee_cropinfo, NULL)) {
       g_printerr ("[DETECT] Elements could not be linked.\n");
       gst_object_unref (app->pipeline);
       return FALSE;
@@ -384,15 +385,15 @@ build_pipeline (AppData *app)
       return FALSE;
     }
     gst_object_unref (queue_pad);
-
-    cropinfo_srcpad = gst_element_get_static_pad (tfilter_cropinfo, "src");
   }
 
   /* Crop video */
   {
-    GstElement *queue, *tconv, *tcrop;
-    GstPad *cropinfo_sinkpad, *tee_pad, *queue_pad;
+    GstElement *queue_cropinfo, *queue, *tconv, *tcrop;
+    GstPad *tee_pad, *queue_pad;
+    GstPad *tee_cropinfo_pad, *queue_cropinfo_pad;
 
+    queue_cropinfo = gst_element_factory_make ("queue", "queue_cropinfo1");
     queue = gst_element_factory_make ("queue", "queue_crop");
     tconv = gst_element_factory_make ("tensor_converter", "tconv_crop");
     tcrop = gst_element_factory_make ("tensor_crop", "tcrop");
@@ -402,12 +403,11 @@ build_pipeline (AppData *app)
       return FALSE;
     }
 
-    gst_bin_add_many (GST_BIN (app->pipeline), queue, tconv, tcrop, NULL);
+    gst_bin_add_many (GST_BIN (app->pipeline), queue_cropinfo, queue, tconv, tcrop, NULL);
 
-    cropinfo_sinkpad = gst_element_get_static_pad (tcrop, "info");
     if (!gst_element_link_many (queue, tconv, NULL)
         || !gst_element_link_pads (tconv, "src", tcrop, "raw")
-        || gst_pad_link (cropinfo_srcpad, cropinfo_sinkpad) != GST_PAD_LINK_OK) {
+        || !gst_element_link_pads (queue_cropinfo, "src", tcrop, "info")) {
       g_printerr ("[CROP] Elements could not be linked.\n");
       gst_object_unref (app->pipeline);
       return FALSE;
@@ -417,7 +417,12 @@ build_pipeline (AppData *app)
     g_print ("[CROP] Obtained request pad %s\n", gst_pad_get_name (tee_pad));
     queue_pad = gst_element_get_static_pad (queue, "sink");
 
-    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK) {
+    tee_cropinfo_pad = gst_element_request_pad_simple (tee_cropinfo, "src_%u");
+    g_print ("[CROP_INFO] Obtained request pad %s\n", gst_pad_get_name (tee_cropinfo_pad));
+    queue_cropinfo_pad = gst_element_get_static_pad (queue_cropinfo, "sink");
+
+    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK
+        || gst_pad_link (tee_cropinfo_pad, queue_cropinfo_pad) != GST_PAD_LINK_OK) {
       g_printerr ("[CROP] Tee could not be linked\n");
       gst_object_unref (app->pipeline);
       return FALSE;
@@ -554,8 +559,6 @@ build_pipeline (AppData *app)
     }
     gst_object_unref (queue_pad);
   }
-
-  gst_object_unref (cropinfo_srcpad);
 
   GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN (app->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "pipeline");
   return TRUE;
