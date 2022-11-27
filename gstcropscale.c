@@ -372,12 +372,10 @@ gst_crop_scale_sink_event (GstCollectPads *pads, GstCollectData *data,
 
       gst_event_parse_caps (event, &caps);
 
+      // FIXME: which pad the event came from
+
       // raw
       ret = gst_video_info_from_caps (&cpad->info, caps);
-
-      GST_DEBUG ("%s", gst_caps_to_string (caps));
-      GST_DEBUG ("%s", ret ? "TRUE" : "FALSE");
-
       if (ret) {
         cpad->is_raw = TRUE;
         gst_event_unref (event);
@@ -407,8 +405,6 @@ gst_crop_scale_sink_event (GstCollectPads *pads, GstCollectData *data,
 static GstFlowReturn
 gst_crop_scale_negotiate (GstCropScale * self)
 {
-  GST_WARNING ("gst_crop_scale_negotiate");
-
   if (!gst_pad_has_current_caps (self->sinkpad_raw)) {
     GST_ERROR_OBJECT (self,
         "The raw pad of crop_scale '%s' does not have pad caps.",
@@ -428,7 +424,7 @@ gst_crop_scale_negotiate (GstCropScale * self)
     GstSegment segment;
     GstCropScalePadData *cpad;
     GSList *walk;
-    gint fps_d, fps_n;
+    gint fps_d, fps_n, width, height;
 
     UNUSED (cpad);
 
@@ -444,37 +440,37 @@ gst_crop_scale_negotiate (GstCropScale * self)
     }
 
     /**
-     * Get config from collect-pads and set framerate.
-     * Output is always flexible tensor.
+     * Get video info from collect-pads and set framerate.
+     * Output is always video/x-raw.
      */
-    //gst_tensors_config_init (&config);
-    //config.format = _NNS_TENSOR_FORMAT_FLEXIBLE;
+
+    fps_n = -1;
+    fps_d = -1;
 
     walk = self->collect->data;
     while (walk) {
       cpad = (GstCropScalePadData *) walk->data;
       if (cpad->is_raw) {
-        GST_DEBUG ("fps: %d/%d", cpad->info.fps_d, cpad->info.fps_n);
-        fps_d = cpad->info.fps_d;
-        fps_n = cpad->info.fps_n;
+        GST_DEBUG ("fps: %d/%d", cpad->info.fps_n, cpad->info.fps_d);
+        if (fps_n < 0 ||
+            gst_util_fraction_compare (cpad->info.fps_n, cpad->info.fps_d,
+              fps_n, fps_d) < 0) {
+          fps_n = cpad->info.fps_n;
+          fps_d = cpad->info.fps_d;
+          width = cpad->info.width;
+          height = cpad->info.height;
+        }
       } else {
-        GST_DEBUG ("rate: %d/%d", cpad->config.rate_d, cpad->config.rate_n);
+        GST_DEBUG ("rate: %d/%d", cpad->config.rate_n, cpad->config.rate_d);
       }
-
-    //  if (config.rate_n < 0 ||
-    //      gst_util_fraction_compare (cpad->config.rate_n, cpad->config.rate_d,
-    //          config.rate_n, config.rate_d) < 0) {
-    //    config.rate_n = cpad->config.rate_n;
-    //    config.rate_d = cpad->config.rate_d;
-    //  }
 
       walk = g_slist_next (walk);
     }
     caps = gst_caps_new_simple ("video/x-raw",
        "format", G_TYPE_STRING, "RGBA",
-       "framerate", GST_TYPE_FRACTION, fps_d, fps_n,
-       "width", G_TYPE_INT, 720,
-       "height", G_TYPE_INT, 720,
+       "framerate", GST_TYPE_FRACTION, fps_n, fps_d,
+       "width", G_TYPE_INT, width,
+       "height", G_TYPE_INT, height,
        NULL);
     gst_pad_set_caps (self->srcpad, caps);
     gst_caps_unref (caps);
@@ -560,14 +556,15 @@ done:
  */
 static GstBuffer *
 gst_crop_scale_do_scale (GstCropScale * self, GstBuffer * raw,
-    tensor_crop_info_s * cinfo)
+    GstVideoInfo *vinfo, tensor_crop_info_s * cinfo)
 {
   GstBuffer *result;
   GstMemory *mem;
   GstMapInfo map;
-  guint i, j;
+  guint i, j, w_inp, h_inp;
   gsize size;
-  guint8 *scaled;
+  guint8 *scaled, *ptr, *inp, *row_ptr, *row_inp, *pix_inp;
+  guint height, width;
 
   i = gst_buffer_n_memory (raw);
   g_assert (i > 0);
@@ -578,34 +575,30 @@ gst_crop_scale_do_scale (GstCropScale * self, GstBuffer * raw,
     return NULL;
   }
 
-  GST_DEBUG ("input buffer size: %zd", map.size);
+  height = vinfo->height;
+  width = vinfo->width;
 
-  size = 4 * 720 * 720;
+  size = 4 * width * height;
   g_assert (size == map.size);
 
   result = gst_buffer_new ();
 
   scaled = g_malloc0 (size);
-  // do something
-  memset (scaled, 0x00000000, size);
-  //memcpy (scaled, map.data, size);
-  guint8 *ptr = scaled + 4 * 720 * cinfo->y + 4 * cinfo->x;
-  guint8 *inp = (guint8 *)map.data;
-  GST_DEBUG ("%d %d %d %d", cinfo->h, cinfo->w, cinfo->x, cinfo->y);
+
+  /* neareast-neighbor */
+  ptr = scaled + 4 * width * cinfo->y + 4 * cinfo->x;
+  inp = (guint8 *)map.data;
   for (i = 0; i < cinfo->h; i++) {
-    int h_inp = (int) ((float)720 / cinfo->h * i);
-    g_assert (h_inp < 720 && 0 <= h_inp);
-    guint8 *row_inp = inp + 4 * 720 * h_inp;
-    guint8 *row_ptr = ptr;
-    //guint8 *row_ptr = ptr;
+    h_inp = (int)((float)height / cinfo->h * i);
+    row_inp = inp + 4 * width * h_inp;
+    row_ptr = ptr;
     for (j = 0; j < cinfo->w; j++) {
-      int w_inp = (int)((float)720 / cinfo->w * j);
-      g_assert (w_inp < 720 && 0 <= w_inp);
-      guint8 *pix_inp = row_inp + 4 * w_inp;
+      w_inp = (int)((float)width / cinfo->w * j);
+      pix_inp = row_inp + 4 * w_inp;
       memcpy (row_ptr, pix_inp, 4);
       row_ptr += 4;
     }
-    ptr += 4 * 720;
+    ptr += 4 * width;
   }
 
   gst_buffer_append_memory (result, 
@@ -623,10 +616,10 @@ static GstFlowReturn
 gst_crop_scale_chain (GstCropScale * self,
     GstCollectData * data_raw, GstCollectData * data_info)
 {
-  GST_WARNING ("gst_crop_scale_chain");
   GstFlowReturn ret;
   GstBuffer *buf_raw, *buf_info, *result;
   GstCropScalePadData *cpad;
+  GstVideoInfo *vinfo;
   tensor_crop_info_s cinfo;
   gboolean drop_raw, drop_info;
 
@@ -644,8 +637,9 @@ gst_crop_scale_chain (GstCropScale * self,
     goto done;
   }
 
-  //cpad = (GstCropScalePadData *) data_raw;
-  //buf_raw = gst_tensor_buffer_from_config (buf_raw, &cpad->config);
+  cpad = (GstCropScalePadData *) data_raw;
+  vinfo = &cpad->info;
+
   //cpad = (GstCropScalePadData *) data_info;
   //buf_info = gst_tensor_buffer_from_config (buf_info, &cpad->config);
 
@@ -654,8 +648,7 @@ gst_crop_scale_chain (GstCropScale * self,
     goto done;
   }
 
-  result = gst_crop_scale_do_scale (self, buf_raw, &cinfo);
-  GST_WARNING ("Let's push");
+  result = gst_crop_scale_do_scale (self, buf_raw, vinfo, &cinfo);
   ret = gst_pad_push (self->srcpad, result);
 
 done:
@@ -683,8 +676,6 @@ gst_crop_scale_collected (GstCollectPads * pads, gpointer user_data)
   GstCollectData *data_raw, *data_info;
   GSList *walk;
   GstFlowReturn ret;
-
-  GST_WARNING ("gst_crop_scale_collected");
 
   self = GST_CROP_SCALE (user_data);
   data_raw = data_info = NULL;
