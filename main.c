@@ -43,12 +43,12 @@ typedef struct
   BlazeFaceInfo detect_model;
   LandmarkModelInfo landmark_model;
 
+  guint video_size;
+
   GstElement *pipeline; /**< gst pipeline for data stream */
 
   GMainLoop *loop; /**< main event loop */
   GstBus *bus; /**< gst bus for data pipeline */
-
-  guint crop_received;
 } AppData;
 
 gboolean
@@ -65,28 +65,33 @@ build_pipeline (AppData *app)
 
   /* Souece video */
   {
-    GstElement *video_source, *convert_source, *filter, *crop_source;
-    GstCaps *convert_caps;
+    GstElement *video_source, *convert, *filter, *crop, *scale;
+    GstCaps *video_caps;
 
     video_source = gst_element_factory_make ("v4l2src", "video_source");
-    convert_source = gst_element_factory_make ("videoconvert", "convert_source");
+    convert = gst_element_factory_make ("videoconvert", "convert_source");
     filter = gst_element_factory_make ("capsfilter", "filter1");
-    crop_source = gst_element_factory_make ("videocrop", "crop_source");
+    crop = gst_element_factory_make ("aspectratiocrop", "crop_source");
+    scale = gst_element_factory_make ("videoscale", "scale_source");
     tee_source = gst_element_factory_make ("tee", "tee_source");
 
-    if (!video_source || !convert_source || !filter || !crop_source || !tee_source) {
+    if (!video_source || !convert || !filter || !crop || !tee_source) {
       g_printerr ("[SOUECE] Not all elements could be created.\n");
       return FALSE;
     }
 
-    convert_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=1280,height=720,framerate=30/1");
-    g_object_set (G_OBJECT (filter), "caps", convert_caps, NULL);
-    gst_caps_unref (convert_caps);
+    g_object_set (crop, "aspect-ratio", 1, 1, NULL);
 
-    g_object_set (crop_source, "left", 280, "right", 280, NULL);
+    video_caps = gst_caps_new_simple ("video/x-raw",
+       "format", G_TYPE_STRING, "RGB",
+       "width", G_TYPE_INT, app->video_size,
+       "height", G_TYPE_INT, app->video_size,
+       NULL);
+    g_object_set (G_OBJECT (filter), "caps", video_caps, NULL);
+    gst_caps_unref (video_caps);
 
-    gst_bin_add_many (GST_BIN (app->pipeline), video_source, convert_source, filter, crop_source, tee_source, NULL);
-    if (!gst_element_link_many (video_source, convert_source, filter, crop_source, tee_source, NULL)) {
+    gst_bin_add_many (GST_BIN (app->pipeline), video_source, convert, crop, scale, filter, tee_source, NULL);
+    if (!gst_element_link_many (video_source, convert, crop, scale, filter, tee_source, NULL)) {
       g_printerr ("[SOURCE] Elements could not be linked.\n");
       gst_object_unref (app->pipeline);
       return FALSE;
@@ -100,6 +105,9 @@ build_pipeline (AppData *app)
     GstElement *scale, *filter, *tconv, *ttransform, *tfilter_detect, *tfilter_cropinfo;
     GstCaps *scale_caps;
     GstPad *tee_pad, *queue_pad;
+    BlazeFaceInfo *info;
+
+    info = &app->detect_model;
 
     queue = gst_element_factory_make ("queue", "queue_detect");
     scale = gst_element_factory_make ("videoscale", "scale_detect");
@@ -115,7 +123,12 @@ build_pipeline (AppData *app)
       return FALSE;
     }
 
-    scale_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=128,height=128,framerate=30/1");
+    scale_caps = gst_caps_new_simple ("video/x-raw",
+       "format", G_TYPE_STRING, "RGB",
+       "framerate", GST_TYPE_FRACTION, 30, 1,
+       "width", G_TYPE_INT, info->tensor_width,
+       "height", G_TYPE_INT, info->tensor_height,
+       NULL);
     g_object_set (G_OBJECT (filter), "caps", scale_caps, NULL);
     gst_caps_unref (scale_caps);
 
@@ -228,6 +241,10 @@ build_pipeline (AppData *app)
     GstElement *queue, *tdec_flexible, *tconv, *ttransform, *tfilter_landmark, *tdec_landmark;
     GstPad *cropped_video_sinkpad;
     GstCaps *cropped_video_caps;
+    LandmarkModelInfo *info;
+    gchar *input_size, *output_size;
+
+    info = &app->landmark_model;
 
     queue = gst_element_factory_make ("queue", "queue_landmark");
     tdec_flexible = gst_element_factory_make ("tensor_decoder", "tdec_flexible");
@@ -244,13 +261,24 @@ build_pipeline (AppData *app)
     g_object_set (tdec_flexible, "mode", "custom-code", "option1", "flexible_to_video", NULL);
     g_object_set (ttransform, "mode", 2 /* GTT_ARITHMETIC */, "option", "typecast:float32,add:-127.5,div:127.5", NULL);
     g_object_set (tfilter_landmark, "framework", "tensorflow-lite", "model", app->landmark_model.model_path, NULL);
-    g_object_set (tdec_landmark, "mode", "face_mesh", "option1", "mediapipe-face-mesh", "option2", "720:720", "option3", "192:192", NULL);
+
+    input_size = g_strdup_printf ("%d:%d", info->tensor_width, info->tensor_height);
+    output_size = g_strdup_printf ("%d:%d", app->video_size, app->video_size);
+    g_object_set (tdec_landmark, "mode", "face_mesh", "option1", "mediapipe-face-mesh", "option2", output_size, "option3", input_size, NULL);
+    g_free (input_size);
+    g_free (output_size);
 
     gst_bin_add_many (GST_BIN (app->pipeline),
         queue, tdec_flexible, tconv, ttransform, tfilter_landmark, tdec_landmark, NULL);
 
     cropped_video_sinkpad = gst_element_get_static_pad (queue, "sink");
-    cropped_video_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=192,height=192,framerate=30/1");
+
+    cropped_video_caps = gst_caps_new_simple ("video/x-raw",
+       "format", G_TYPE_STRING, "RGB",
+       "framerate", GST_TYPE_FRACTION, 30, 1,
+       "width", G_TYPE_INT, info->tensor_width,
+       "height", G_TYPE_INT, info->tensor_height,
+       NULL);
     if (gst_pad_link (cropped_video_srcpad, cropped_video_sinkpad) != GST_PAD_LINK_OK
         || !gst_element_link (queue, tdec_flexible)
         || !gst_element_link_filtered (tdec_flexible, tconv, cropped_video_caps)
@@ -335,19 +363,19 @@ build_pipeline (AppData *app)
 }
 
 static void
-margin_object(detectedObject *orig, detectedObject *margined, float margin_rate)
+margin_object(detectedObject *orig, detectedObject *margined, gfloat margin_rate, guint video_size)
 {
-  int height = orig->height;
-  int width = orig->width;
-  int orig_size = MAX(height, width);
-  int margin = orig_size * margin_rate;
-  int size = MIN(orig_size + margin * 2, 720);
-  int x = MIN(MAX(orig->x - margin, 0), 720 - size);
-  int y = MIN(MAX(orig->y - margin, 0), 720 - size);
+  gint height = orig->height;
+  gint width = orig->width;
+  gint orig_size = MAX(height, width);
+  gint margin = orig_size * margin_rate;
+  gint margined_size = MIN(orig_size + margin * 2, video_size);
+  gint x = MIN(MAX(orig->x - margin, 0), video_size - margined_size);
+  gint y = MIN(MAX(orig->y - margin, 0), video_size - margined_size);
   margined->x = x;
   margined->y = y;
-  margined->width = size;
-  margined->height = size;
+  margined->width = margined_size;
+  margined->height = margined_size;
 }
 
 /**
@@ -377,7 +405,7 @@ cef_func_detection_to_cropinfo (void *private_data, const GstTensorFilterPropert
   nms (results, info->iou_thresh);
 
   if (results->len == 0) {
-    _print_log ("no detected object");
+    //_print_log ("no detected object");
     info_data[0] = 0U;
     info_data[1] = 0U;
     info_data[2] = info->i_width;
@@ -386,7 +414,7 @@ cef_func_detection_to_cropinfo (void *private_data, const GstTensorFilterPropert
     detectedObject *object = &g_array_index (results, detectedObject, 0);
     detectedObject margined;
 
-    margin_object (object, &margined, 0.25);
+    margin_object (object, &margined, 0.25, app->video_size);
     //_print_log ("detected: %d %d %d %d = %d", object->x, object->y, object->height, object->width, object->height * object->width * 3);
     //_print_log ("detected: %d %d %d %d = %d", margined.x, margined.y, margined.height, margined.width, margined.height * margined.width * 3);
 
@@ -412,8 +440,10 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
   gsize hsize, dsize, esize;
   const GstTensorMemory *tmem = &input[0];
   gboolean need_alloc;
+  guint width, height;
 
-  UNUSED (app);
+  width = app->landmark_model.tensor_width;
+  height = app->landmark_model.tensor_height;
 
   g_assert (gst_tensors_config_is_flexible(config));
   g_assert (config->info.num_tensors >= 1);
@@ -439,7 +469,7 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
   g_assert (3 == dim[0]);
   g_assert (dim[1] == dim[2]);
 
-  size_t size = _get_video_xraw_RGB_bufsize (192, 192);
+  size_t size = _get_video_xraw_RGB_bufsize (width, height);
 
   need_alloc = (gst_buffer_get_size (out_buf) == 0);
 
@@ -462,17 +492,17 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
   int h, w;
   uint8_t *ptr = (uint8_t *)out_info.data;
   uint8_t *inp = (uint8_t *)tmem->data + hsize;
-  for (h = 0; h < 192; h++) {
-    int h_inp = (int)((float)dim[2] / 192 * h);
+  for (h = 0; h < height; h++) {
+    int h_inp = (int)((float)dim[2] / height * h);
     uint8_t *row_inp = inp + dim[0] * dim[1] * h_inp;
     uint8_t *row_ptr = ptr;
-    for (w = 0; w < 192; w++) {
-      int w_inp = (int)((float)dim[1] / 192 * w);
+    for (w = 0; w < width; w++) {
+      int w_inp = (int)((float)dim[1] / width * w);
       uint8_t *pix_inp = row_inp + dim[0] * w_inp;
       memcpy (row_ptr, pix_inp, 3);
       row_ptr += 3;
     }
-    ptr += ((3 * 192 - 1) / 4 + 1) * 4;
+    ptr += ((3 * width - 1) / 4 + 1) * 4;
   }
 
   gst_memory_unmap (out_mem, &out_info);
@@ -487,7 +517,7 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
 }
 
 static gboolean
-init_blazeface (BlazeFaceInfo *info, const gchar *path)
+init_blazeface (BlazeFaceInfo *info, const gchar *path, guint video_size)
 {
   const gchar detect_model[] = "face_detection_short_range.tflite";
   const gchar detect_box_prior[] = "box_prior.txt";
@@ -500,10 +530,13 @@ init_blazeface (BlazeFaceInfo *info, const gchar *path)
   info->y_scale = 128;
   info->h_scale = 128;
   info->w_scale = 128;
-  info->i_width = 720;
-  info->i_height = 720;
   info->min_score_thresh = 0.5f;
   info->iou_thresh = 0.3f;
+  info->tensor_width = 128;
+  info->tensor_height = 128;
+
+  info->i_width = video_size;
+  info->i_height = video_size;
 
   if (!g_file_test (info->model_path, G_FILE_TEST_IS_REGULAR)) {
     g_critical ("cannot find tflite model [%s]", info->model_path);
@@ -521,15 +554,15 @@ init_blazeface (BlazeFaceInfo *info, const gchar *path)
 }
 
 static gboolean
-init_landmark_model (LandmarkModelInfo *info, const gchar *path)
+init_landmark_model (LandmarkModelInfo *info, const gchar *path, guint video_size)
 {
   const gchar landmark_model[] = "face_landmark.tflite";
 
   info->model_path = g_strdup_printf ("%s/%s", path, landmark_model);
   info->tensor_width = 192;
   info->tensor_height = 192;
-  info->i_width = 720;
-  info->i_height = 720;
+  info->i_width = video_size;
+  info->i_height = video_size;
 
   if (!g_file_test (info->model_path, G_FILE_TEST_IS_REGULAR)) {
     g_critical ("cannot find tflite model [%s]", info->model_path);
@@ -544,9 +577,10 @@ init_app (AppData *app)
 {
   const gchar resource_path[] = "./res";
 
-  init_blazeface (&app->detect_model, resource_path);
-  init_landmark_model (&app->landmark_model, resource_path);
-  app->crop_received = 0;
+  app->video_size = 720;
+  init_blazeface (&app->detect_model, resource_path, app->video_size);
+  init_landmark_model (&app->landmark_model, resource_path, app->video_size);
+
 
   app->loop = g_main_loop_new (NULL, FALSE);
 

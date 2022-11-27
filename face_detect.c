@@ -28,6 +28,8 @@ typedef struct
   guint y_scale;
   guint h_scale;
   guint w_scale;
+  guint tensor_width;
+  guint tensor_height;
 
   guint i_width;
   guint i_height;
