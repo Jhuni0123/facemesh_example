@@ -520,7 +520,7 @@ static gboolean
 init_blazeface (BlazeFaceInfo *info, const gchar *path, guint video_size)
 {
   const gchar detect_model[] = "face_detection_short_range.tflite";
-  const gchar detect_box_prior[] = "box_prior.txt";
+  const gchar detect_box_prior[] = "box_prior_face_detection_short_range.txt";
   const guint num_boxs = BLAZEFACE_SHORT_RANGE_NUM_BOXS;
 
   info->model_path = g_strdup_printf ("%s/%s", path, detect_model);
