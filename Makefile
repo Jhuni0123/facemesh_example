@@ -10,4 +10,4 @@ main: main.c gstcropscale.o
 	gcc -Wall main.c -o main `pkg-config --cflags --libs gstreamer-1.0 nnstreamer` -D DBG -lm
 
 clean:
-	rm -f main
+	rm -f main gstcropscale.o gstcropscale.so
