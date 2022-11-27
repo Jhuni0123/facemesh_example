@@ -358,7 +358,7 @@ build_pipeline (AppData *app)
       return FALSE;
     }
 
-    scale_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=128,height=128");
+    scale_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=128,height=128,framerate=30/1");
     g_object_set (G_OBJECT (filter), "caps", scale_caps, NULL);
     gst_caps_unref (scale_caps);
 
@@ -503,29 +503,36 @@ build_pipeline (AppData *app)
       gst_object_unref (app->pipeline);
       return FALSE;
     }
-    g_object_unref (cropped_video_caps);
+    
+    gst_caps_unref (cropped_video_caps);
 
     landmark_overray_srcpad = gst_element_get_static_pad (tdec_landmark, "src");
   }
 
   /* Result video */
   {
-    GstElement *queue, *compositor, *convert, *video_sink;
-    GstPad *tee_pad, *queue_pad, *compositor_overray_pad, *compositor_video_pad;
+    GstElement *queue, *compositor, *convert, *video_sink, *queue_cropinfo, *crop_scale;
+    GstPad *tee_pad, *queue_pad, *compositor_overray_pad, *compositor_video_pad, *overray_pad, *overray_raw_pad;
+    GstPad *tee_cropinfo_pad, *queue_cropinfo_pad;
 
     queue = gst_element_factory_make ("queue", "queue_result");
+    queue_cropinfo = gst_element_factory_make ("queue", "queue_cropinfo2");
     compositor = gst_element_factory_make ("compositor", "compositor");
     convert = gst_element_factory_make ("videoconvert", "convert_result");
     video_sink = gst_element_factory_make ("autovideosink", "video_sink");
+    crop_scale = gst_element_factory_make ("crop_scale", "crop_scale");
 
-    if (!queue || !compositor || !convert || !video_sink) {
+    if (!queue || !compositor || !convert || !video_sink || !queue_cropinfo || !crop_scale) {
       g_printerr ("[RESULT] Not all elements could be created.\n");
       return FALSE;
     }
 
-    gst_bin_add_many (GST_BIN (app->pipeline), queue, compositor, convert, video_sink, NULL);
+    gst_bin_add_many (GST_BIN (app->pipeline), queue, compositor, convert, video_sink, queue_cropinfo, crop_scale, NULL);
     
-    if (!gst_element_link_many (compositor, convert, video_sink, NULL)) {
+    overray_raw_pad = gst_element_get_static_pad (crop_scale, "raw");
+    if (!gst_element_link_many (compositor, convert, video_sink, NULL)
+        || !gst_element_link_pads (queue_cropinfo, "src", crop_scale, "info")
+        || gst_pad_link (landmark_overray_srcpad, overray_raw_pad) != GST_PAD_LINK_OK) {
       g_printerr ("[RESULT] Elements could not be linked.\n");
       gst_object_unref (app->pipeline);
       return FALSE;
@@ -540,7 +547,8 @@ build_pipeline (AppData *app)
     g_object_set (compositor_video_pad, "zorder", 1, NULL);
     queue_pad = gst_element_get_static_pad (queue, "src");
 
-    if (gst_pad_link (landmark_overray_srcpad, compositor_overray_pad) != GST_PAD_LINK_OK
+    overray_pad = gst_element_get_static_pad (crop_scale, "src");
+    if (gst_pad_link (overray_pad, compositor_overray_pad) != GST_PAD_LINK_OK
         || gst_pad_link (queue_pad, compositor_video_pad) != GST_PAD_LINK_OK) {
       g_printerr ("[RESULT] Compositor could not be linked\n");
       gst_object_unref (app->pipeline);
@@ -552,7 +560,12 @@ build_pipeline (AppData *app)
     g_print ("[RESULT] Obtained request pad %s\n", gst_pad_get_name (tee_pad));
     queue_pad = gst_element_get_static_pad (queue, "sink");
 
-    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK) {
+    tee_cropinfo_pad = gst_element_request_pad_simple (tee_cropinfo, "src_%u");
+    g_print ("[CROP_INFO] Obtained request pad %s\n", gst_pad_get_name (tee_cropinfo_pad));
+    queue_cropinfo_pad = gst_element_get_static_pad (queue_cropinfo, "sink");
+
+    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK
+        || gst_pad_link (tee_cropinfo_pad, queue_cropinfo_pad) != GST_PAD_LINK_OK) {
       g_printerr ("[RESULT] Tee could not be linked\n");
       gst_object_unref (app->pipeline);
       return FALSE;
