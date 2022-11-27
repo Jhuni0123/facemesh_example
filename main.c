@@ -28,27 +28,6 @@
 #define sigmoid(x) \
     (1.f / (1.f + expf (- ((float)x))))
 
-/**
- * @brief Function to print caps.
- */
-static void
-_parse_caps (GstCaps * caps)
-{
-  guint caps_size, i;
-
-  g_return_if_fail (caps != NULL);
-
-  caps_size = gst_caps_get_size (caps);
-
-  for (i = 0; i < caps_size; i++) {
-    GstStructure *structure = gst_caps_get_structure (caps, i);
-    gchar *str = gst_structure_to_string (structure);
-
-    _print_log ("[%d] %s", i, str);
-    g_free (str);
-  }
-}
-
 #define BLAZEFACE_SHORT_RANGE_NUM_BOXS  (896)
 #define BLAZEFACE_NUM_COORD             (16)
 
@@ -187,15 +166,6 @@ nms (GArray * results, gfloat threshold)
   } while (i < results->len);
 }
 
-static gboolean
-convert_to_detection (BlazeFaceInfo *info, float* detection_boxes, float* detection_scores, GArray *result)
-{
-  for (int i = 0; i < info->num_boxes; i++) {
-
-  }
-  return TRUE;
-}
-
 gboolean
 get_detected_object_i (int i, float* raw_boxes, float* raw_scores, BlazeFaceInfo *info, detectedObject *object)
 {
@@ -240,64 +210,10 @@ get_detected_object_i (int i, float* raw_boxes, float* raw_scores, BlazeFaceInfo
   return TRUE;
 }
 
-static void
-crop_new_data_cb (GstElement * element, GstBuffer * buffer, AppData *app)
-{
-  gsize raw_boxes_size, raw_scores_size;
-  float *raw_boxes, *raw_scores;
-  BlazeFaceInfo *info = &app->detect_model;
-
-  app->crop_received++;
-  if (TRUE || app->crop_received % 90 == 0) {
-    _print_log ("CROP::receiving new data [%d]", app->crop_received);
-  }
-
-  {
-    GstMemory *mem;
-    GstMapInfo info;
-    guint i;
-    guint num_mems;
-    GstTensorMetaInfo meta;
-
-    num_mems = gst_buffer_n_memory (buffer);
-
-    _print_log ("num_mems %u", num_mems);
-    for (int i = 0; i < num_mems; i++) {
-      mem = gst_buffer_peek_memory (buffer, 0);
-      gst_tensor_meta_info_parse_memory (&meta, mem);
-      _print_log("tensor meta info type: %d", meta.type);
-      _print_log("tensor meta info format: %d", meta.format);
-      _print_log("tensor meta info media_type: %d", meta.media_type);
-      _print_log("tensor meta info dimension: %d:%d:%d", meta.dimension[0], meta.dimension[1], meta.dimension[2]);
-      if (gst_memory_map (mem, &info, GST_MAP_READ)) {
-        /* check data (info.data, info.size) */
-        _print_log ("received %zd", info.size);
-        gst_memory_unmap (mem, &info);
-      }
-    }
-  }
-
-  {
-    GstPad *sink_pad;
-    GstCaps *caps;
-
-    sink_pad = gst_element_get_static_pad (element, "sink");
-
-    if (sink_pad) {
-      caps = gst_pad_get_current_caps (sink_pad);
-
-      if (caps) {
-        _parse_caps (caps);
-        gst_caps_unref (caps);
-      }
-    }
-  }
-}
-
 gboolean
 build_pipeline (AppData *app)
 {
-  GstElement *tee_source, *compositor, *tee_cropinfo;
+  GstElement *tee_source, *tee_cropinfo;
   GstPad *cropped_video_srcpad, *landmark_overray_srcpad;
 
   app->pipeline = gst_pipeline_new ("facemesh-pipeline");
@@ -730,6 +646,8 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
   const GstTensorMemory *tmem = &input[0];
   gboolean need_alloc;
 
+  UNUSED (app);
+
   g_assert (gst_tensors_config_is_flexible(config));
   g_assert (config->info.num_tensors >= 1);
 
@@ -883,7 +801,7 @@ init_app (AppData *app)
   info_out.info[0].name = NULL;
   info_out.info[0].type = _NNS_UINT32;
   gst_tensor_parse_dimension ("4:1", info_out.info[0].dimension);
-  int ret = NNS_custom_easy_register ("detection_to_cropinfo", cef_func_detection_to_cropinfo, app, &info_in, &info_out);
+  NNS_custom_easy_register ("detection_to_cropinfo", cef_func_detection_to_cropinfo, app, &info_in, &info_out);
 
   /* register custom flexible tensor to video decoder */
   nnstreamer_decoder_custom_register ("flexible_to_video", flexible_tensor_to_video, app);
@@ -899,7 +817,6 @@ static void
 message_cb (GstBus *bus, GstMessage *msg, AppData *app)
 {
   GError *err;
-  GstState old_state, new_state, pending_state;
   gchar *debug_info;
 
   switch (GST_MESSAGE_TYPE (msg)) {
@@ -911,14 +828,8 @@ message_cb (GstBus *bus, GstMessage *msg, AppData *app)
       g_free (debug_info);
       g_main_loop_quit (app->loop);
       break;
-    case GST_MESSAGE_STATE_CHANGED:
-      gst_message_parse_state_changed (msg, &old_state, &new_state, &pending_state);
-      g_print ("%s state changed from %s to %s:\n", GST_OBJECT_NAME (msg->src), gst_element_state_get_name (old_state), gst_element_state_get_name (new_state));
-      break;
-    case GST_MESSAGE_QOS:
-      break;
     default:
-      g_printerr ("msg from %s:  %s\n", GST_OBJECT_NAME (msg->src), gst_message_type_get_name (GST_MESSAGE_TYPE (msg)));
+      // g_printerr ("msg from %s:  %s\n", GST_OBJECT_NAME (msg->src), gst_message_type_get_name (GST_MESSAGE_TYPE (msg)));
       break;
   }
 }
