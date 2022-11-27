@@ -463,17 +463,18 @@ build_pipeline (AppData *app)
 
   /* Face Landmark */
   {
-    GstElement *tdec_flexible, *tconv, *ttransform, *tfilter_landmark, *tdec_landmark;
+    GstElement *queue, *tdec_flexible, *tconv, *ttransform, *tfilter_landmark, *tdec_landmark;
     GstPad *cropped_video_sinkpad;
     GstCaps *cropped_video_caps;
 
+    queue = gst_element_factory_make ("queue", "queue_landmark");
     tdec_flexible = gst_element_factory_make ("tensor_decoder", "tdec_flexible");
     tconv = gst_element_factory_make ("tensor_converter", "tconv_landmark");
     ttransform = gst_element_factory_make ("tensor_transform", "ttransform_landmark");
     tfilter_landmark = gst_element_factory_make ("tensor_filter", "tfilter_landmark");
     tdec_landmark = gst_element_factory_make ("tensor_decoder", "tdec_landmark");
 
-    if (!tdec_flexible || !tconv || !ttransform || !tfilter_landmark || !tdec_landmark) {
+    if (!queue || !tdec_flexible || !tconv || !ttransform || !tfilter_landmark || !tdec_landmark) {
       g_printerr ("[LANDMARK] Not all elements could be created.\n");
       return FALSE;
     }
@@ -484,11 +485,12 @@ build_pipeline (AppData *app)
     g_object_set (tdec_landmark, "mode", "face_mesh", "option1", "mediapipe-face-mesh", "option2", "720:720", "option3", "192:192", NULL);
 
     gst_bin_add_many (GST_BIN (app->pipeline),
-        tdec_flexible, tconv, ttransform, tfilter_landmark, tdec_landmark, NULL);
+        queue, tdec_flexible, tconv, ttransform, tfilter_landmark, tdec_landmark, NULL);
 
-    cropped_video_sinkpad = gst_element_get_static_pad (tdec_flexible, "sink");
+    cropped_video_sinkpad = gst_element_get_static_pad (queue, "sink");
     cropped_video_caps = gst_caps_from_string ("video/x-raw,format=RGB,width=192,height=192,framerate=30/1");
     if (gst_pad_link (cropped_video_srcpad, cropped_video_sinkpad) != GST_PAD_LINK_OK
+        || !gst_element_link (queue, tdec_flexible)
         || !gst_element_link_filtered (tdec_flexible, tconv, cropped_video_caps)
         || !gst_element_link_many (tconv, ttransform, tfilter_landmark, tdec_landmark, NULL))
     {
@@ -496,6 +498,7 @@ build_pipeline (AppData *app)
       gst_object_unref (app->pipeline);
       return FALSE;
     }
+    g_object_unref (cropped_video_caps);
 
     landmark_overray_srcpad = gst_element_get_static_pad (tdec_landmark, "src");
   }
