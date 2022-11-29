@@ -24,6 +24,9 @@
  */
 #define _print_log(...) if (DBG) g_message (__VA_ARGS__)
 
+/**
+ * @brief Information of landmark model.
+ */
 typedef struct
 {
   gchar *model_path;
@@ -258,7 +261,7 @@ build_pipeline (AppData *app)
       return FALSE;
     }
 
-    g_object_set (tdec_flexible, "mode", "custom-code", "option1", "flexible_to_video", NULL);
+    g_object_set (tdec_flexible, "mode", "custom-code", "option1", "flexible_tensor_scale", NULL);
     input_dim = g_strdup_printf ("3:%d:%d", info->tensor_width, info->tensor_height);
     g_object_set (tconv, "input-type", "uint8", "input-dim", input_dim, NULL);
     g_free (input_dim);
@@ -380,7 +383,7 @@ margin_object(detectedObject *orig, detectedObject *margined, gfloat margin_rate
 }
 
 /**
- * @brief In-Code Test Function for custom-easy filter
+ * @brief Custom-easy filter function that transform detection to crop info
  */
 static int
 cef_func_detection_to_cropinfo (void *private_data, const GstTensorFilterProperties *prop,
@@ -427,7 +430,11 @@ cef_func_detection_to_cropinfo (void *private_data, const GstTensorFilterPropert
   return 0;
 }
 
-int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConfig *config, void *data, GstBuffer *out_buf) {
+/**
+ * @brief Custom decoder function that scale flexible video tensor to static tensor
+ */
+static int
+cd_flexible_tensor_scale (const GstTensorMemory *input, const GstTensorsConfig *config, void *data, GstBuffer *out_buf) {
   AppData *app = data;
   GstMapInfo out_info;
   GstMemory *out_mem;
@@ -482,7 +489,6 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
     return GST_FLOW_ERROR;
   }
   
-  //memset (out_info.data, 0xFF0000FF, size);
   /* neareast-neighbor */
   int h, w;
   uint8_t *ptr = (uint8_t *)out_info.data;
@@ -568,17 +574,15 @@ init_landmark_model (LandmarkModelInfo *info, const gchar *path, guint video_siz
 gboolean 
 init_app (AppData *app)
 {
+  GstTensorsInfo info_in;
+  GstTensorsInfo info_out;
   const gchar resource_path[] = "./res";
 
   app->video_size = 720;
   init_blazeface (&app->detect_model, resource_path, app->video_size);
   init_landmark_model (&app->landmark_model, resource_path, app->video_size);
 
-
   app->loop = g_main_loop_new (NULL, FALSE);
-
-  GstTensorsInfo info_in;
-  GstTensorsInfo info_out;
 
   /* register custom crop_info filter */
   gst_tensors_info_init (&info_in);
@@ -598,7 +602,7 @@ init_app (AppData *app)
   NNS_custom_easy_register ("detection_to_cropinfo", cef_func_detection_to_cropinfo, app, &info_in, &info_out);
 
   /* register custom flexible tensor to video decoder */
-  nnstreamer_decoder_custom_register ("flexible_to_video", flexible_tensor_to_video, app);
+  nnstreamer_decoder_custom_register ("flexible_tensor_scale", cd_flexible_tensor_scale, app);
 
   if (!build_pipeline (app)) {
     return FALSE;
@@ -632,7 +636,6 @@ int
 main (int argc, char *argv[])
 {
   AppData app;
-
   GstBus *bus;
 
   /* Initialize GStreamer */
