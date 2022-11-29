@@ -157,6 +157,7 @@ build_pipeline (AppData *app)
       gst_object_unref (app->pipeline);
       return FALSE;
     }
+    gst_object_unref (tee_pad);
     gst_object_unref (queue_pad);
   }
 
@@ -212,7 +213,10 @@ build_pipeline (AppData *app)
       gst_object_unref (app->pipeline);
       return FALSE;
     }
+    gst_object_unref (tee_pad);
     gst_object_unref (queue_pad);
+    gst_object_unref (tee_cropinfo_pad);
+    gst_object_unref (queue_cropinfo_pad);
   }
 
   /* Cropped video to videosink */
@@ -334,6 +338,7 @@ build_pipeline (AppData *app)
       gst_object_unref (app->pipeline);
       return FALSE;
     }
+    gst_object_unref (overray_raw_pad);
 
     compositor_overray_pad = gst_element_request_pad_simple (compositor, "sink_%u");
     _print_log ("[RESULT] Obtained request pad %s\n", gst_pad_get_name (compositor_overray_pad));
@@ -351,6 +356,9 @@ build_pipeline (AppData *app)
       gst_object_unref (app->pipeline);
       return FALSE;
     }
+    gst_object_unref (compositor_overray_pad);
+    gst_object_unref (compositor_video_pad);
+    gst_object_unref (overray_pad);
     gst_object_unref (queue_pad);
 
     tee_pad = gst_element_request_pad_simple (tee_source, "src_%u");
@@ -367,8 +375,13 @@ build_pipeline (AppData *app)
       gst_object_unref (app->pipeline);
       return FALSE;
     }
+    gst_object_unref (tee_pad);
     gst_object_unref (queue_pad);
+    gst_object_unref (tee_cropinfo_pad);
+    gst_object_unref (queue_cropinfo_pad);
   }
+
+  gst_object_unref (landmark_overray_srcpad);
 
   GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN (app->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "pipeline");
   return TRUE;
