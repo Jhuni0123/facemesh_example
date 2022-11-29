@@ -54,6 +54,47 @@ typedef struct
   GstBus *bus; /**< gst bus for data pipeline */
 } AppData;
 
+int
+request_tee_and_link (GstElement *tee, GstElement *sink, gchar *sink_pad_name) {
+  GstPad *tee_pad, *sink_pad;
+
+  tee_pad = gst_element_request_pad_simple (tee, "src_%u");
+  _print_log ("Obtained request pad %s.%s\n",
+      gst_element_get_name (tee), gst_pad_get_name (tee_pad));
+  sink_pad = gst_element_get_static_pad (sink, sink_pad_name);
+
+  if (gst_pad_link (tee_pad, sink_pad) != GST_PAD_LINK_OK) {
+    g_printerr ("%s.%s and %s.%s could not be linked.\n",
+        gst_element_get_name (tee), gst_pad_get_name (tee_pad), gst_element_get_name (sink), sink_pad_name);
+    return FALSE;
+  }
+  gst_object_unref (tee_pad);
+  gst_object_unref (sink_pad);
+
+  return TRUE;
+}
+
+int
+request_compositor_and_link (GstElement *src, gchar *src_pad_name, GstElement *compositor, guint zorder) {
+  GstPad *src_pad, *compositor_pad;
+
+  compositor_pad = gst_element_request_pad_simple (compositor, "sink_%u");
+  _print_log ("Obtained request pad %s.%s\n",
+      gst_element_get_name (compositor), gst_pad_get_name (compositor_pad));
+  g_object_set (compositor_pad, "zorder", zorder, NULL);
+  src_pad = gst_element_get_static_pad (src, src_pad_name);
+
+  if (gst_pad_link (src_pad, compositor_pad) != GST_PAD_LINK_OK) {
+    g_printerr ("%s.%s and %s.%s could not be linked.\n",
+        gst_element_get_name (src), src_pad_name, gst_element_get_name (compositor), gst_pad_get_name (compositor_pad));
+    return FALSE;
+  }
+  gst_object_unref (compositor_pad);
+  gst_object_unref (src_pad);
+
+  return TRUE;
+}
+
 gboolean
 build_pipeline (AppData *app)
 {
@@ -107,7 +148,6 @@ build_pipeline (AppData *app)
     GstElement *queue;
     GstElement *scale, *filter, *tconv, *ttransform, *tfilter_detect, *tfilter_cropinfo;
     GstCaps *scale_caps;
-    GstPad *tee_pad, *queue_pad;
     BlazeFaceInfo *info;
 
     info = &app->detect_model;
@@ -148,24 +188,15 @@ build_pipeline (AppData *app)
       return FALSE;
     }
 
-    tee_pad = gst_element_request_pad_simple (tee_source, "src_%u");
-    _print_log ("[DETECT] Obtained request pad %s\n", gst_pad_get_name (tee_pad));
-    queue_pad = gst_element_get_static_pad (queue, "sink");
-
-    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK) {
-      g_printerr ("[DETECT] Tee could not be linked\n");
+    if (!request_tee_and_link (tee_source, queue, "sink")) {
       gst_object_unref (app->pipeline);
       return FALSE;
     }
-    gst_object_unref (tee_pad);
-    gst_object_unref (queue_pad);
   }
 
   /* Crop video */
   {
     GstElement *queue_cropinfo, *queue, *tconv_src, *tcrop, *tdec_flexible, *tconv;
-    GstPad *tee_pad, *queue_pad;
-    GstPad *tee_cropinfo_pad, *queue_cropinfo_pad;
     gchar *input_dim;
 
     queue_cropinfo = gst_element_factory_make ("queue", "queue_cropinfo1");
@@ -199,30 +230,16 @@ build_pipeline (AppData *app)
       return FALSE;
     }
 
-    tee_pad = gst_element_request_pad_simple (tee_source, "src_%u");
-    _print_log ("[CROP] Obtained request pad %s\n", gst_pad_get_name (tee_pad));
-    queue_pad = gst_element_get_static_pad (queue, "sink");
-
-    tee_cropinfo_pad = gst_element_request_pad_simple (tee_cropinfo, "src_%u");
-    _print_log ("[CROP_INFO] Obtained request pad %s\n", gst_pad_get_name (tee_cropinfo_pad));
-    queue_cropinfo_pad = gst_element_get_static_pad (queue_cropinfo, "sink");
-
-    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK
-        || gst_pad_link (tee_cropinfo_pad, queue_cropinfo_pad) != GST_PAD_LINK_OK) {
-      g_printerr ("[CROP] Tee could not be linked\n");
+    if (!request_tee_and_link (tee_source, queue, "sink")
+        || !request_tee_and_link (tee_cropinfo, queue_cropinfo, "sink")) {
       gst_object_unref (app->pipeline);
       return FALSE;
     }
-    gst_object_unref (tee_pad);
-    gst_object_unref (queue_pad);
-    gst_object_unref (tee_cropinfo_pad);
-    gst_object_unref (queue_cropinfo_pad);
   }
 
   /* Cropped video to videosink */
   {
     GstElement *queue, *tdec_video, *convert, *video_sink;
-    GstPad *tee_pad, *queue_pad;
 
     queue = gst_element_factory_make ("queue", "queue_cropped_video");
     tdec_video = gst_element_factory_make ("tensor_decoder", "tdec_video");
@@ -244,23 +261,15 @@ build_pipeline (AppData *app)
       return FALSE;
     }
 
-    tee_pad = gst_element_request_pad_simple (tee_cropped_video, "src_%u");
-    _print_log ("[CROPPED VIDEO] Obtained request pad %s\n", gst_pad_get_name (tee_pad));
-    queue_pad = gst_element_get_static_pad (queue, "sink");
-
-    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK) {
-      g_printerr ("[CROPPED VIDEO] Tee could not be linked\n");
+    if (!request_tee_and_link (tee_cropped_video, queue, "sink")) {
       gst_object_unref (app->pipeline);
       return FALSE;
     }
-    gst_object_unref (tee_pad);
-    gst_object_unref (queue_pad);
   }
 
   /* Face Landmark */
   {
     GstElement *queue, *ttransform, *tfilter_landmark, *tdec_landmark;
-    GstPad *tee_pad, *queue_pad;
     LandmarkModelInfo *info;
     gchar *input_size, *output_size;
 
@@ -295,17 +304,10 @@ build_pipeline (AppData *app)
       return FALSE;
     }
 
-    tee_pad = gst_element_request_pad_simple (tee_cropped_video, "src_%u");
-    _print_log ("[LANDMARK] Obtained request pad %s\n", gst_pad_get_name (tee_pad));
-    queue_pad = gst_element_get_static_pad (queue, "sink");
-
-    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK) {
-      g_printerr ("[LANDMARK] Tee could not be linked\n");
+    if (!request_tee_and_link (tee_cropped_video, queue, "sink")) {
       gst_object_unref (app->pipeline);
       return FALSE;
     }
-    gst_object_unref (tee_pad);
-    gst_object_unref (queue_pad);
 
     landmark_overray_srcpad = gst_element_get_static_pad (tdec_landmark, "src");
   }
@@ -313,8 +315,7 @@ build_pipeline (AppData *app)
   /* Result video */
   {
     GstElement *queue, *compositor, *convert, *video_sink, *queue_cropinfo, *crop_scale;
-    GstPad *tee_pad, *queue_pad, *compositor_overray_pad, *compositor_video_pad, *overray_pad, *overray_raw_pad;
-    GstPad *tee_cropinfo_pad, *queue_cropinfo_pad;
+    GstPad *overray_raw_pad;
 
     queue = gst_element_factory_make ("queue", "queue_result");
     queue_cropinfo = gst_element_factory_make ("queue", "queue_cropinfo2");
@@ -340,45 +341,14 @@ build_pipeline (AppData *app)
     }
     gst_object_unref (overray_raw_pad);
 
-    compositor_overray_pad = gst_element_request_pad_simple (compositor, "sink_%u");
-    _print_log ("[RESULT] Obtained request pad %s\n", gst_pad_get_name (compositor_overray_pad));
-    g_object_set (compositor_overray_pad, "zorder", 2, NULL);
-
-    compositor_video_pad = gst_element_request_pad_simple (compositor, "sink_%u");
-    _print_log ("[RESULT] Obtained request pad %s\n", gst_pad_get_name (compositor_video_pad));
-    g_object_set (compositor_video_pad, "zorder", 1, NULL);
-    queue_pad = gst_element_get_static_pad (queue, "src");
-
-    overray_pad = gst_element_get_static_pad (crop_scale, "src");
-    if (gst_pad_link (overray_pad, compositor_overray_pad) != GST_PAD_LINK_OK
-        || gst_pad_link (queue_pad, compositor_video_pad) != GST_PAD_LINK_OK) {
-      g_printerr ("[RESULT] Compositor could not be linked\n");
+    if (!request_compositor_and_link (queue, "src", compositor, 1)
+        || !request_compositor_and_link (crop_scale, "src", compositor, 2)
+        || !request_tee_and_link (tee_source, queue, "sink")
+        || !request_tee_and_link (tee_cropinfo, queue_cropinfo, "sink")) {
       gst_object_unref (app->pipeline);
       return FALSE;
     }
-    gst_object_unref (compositor_overray_pad);
-    gst_object_unref (compositor_video_pad);
-    gst_object_unref (overray_pad);
-    gst_object_unref (queue_pad);
 
-    tee_pad = gst_element_request_pad_simple (tee_source, "src_%u");
-    _print_log ("[RESULT] Obtained request pad %s\n", gst_pad_get_name (tee_pad));
-    queue_pad = gst_element_get_static_pad (queue, "sink");
-
-    tee_cropinfo_pad = gst_element_request_pad_simple (tee_cropinfo, "src_%u");
-    _print_log ("[CROP_INFO] Obtained request pad %s\n", gst_pad_get_name (tee_cropinfo_pad));
-    queue_cropinfo_pad = gst_element_get_static_pad (queue_cropinfo, "sink");
-
-    if (gst_pad_link (tee_pad, queue_pad) != GST_PAD_LINK_OK
-        || gst_pad_link (tee_cropinfo_pad, queue_cropinfo_pad) != GST_PAD_LINK_OK) {
-      g_printerr ("[RESULT] Tee could not be linked\n");
-      gst_object_unref (app->pipeline);
-      return FALSE;
-    }
-    gst_object_unref (tee_pad);
-    gst_object_unref (queue_pad);
-    gst_object_unref (tee_cropinfo_pad);
-    gst_object_unref (queue_cropinfo_pad);
   }
 
   gst_object_unref (landmark_overray_srcpad);
