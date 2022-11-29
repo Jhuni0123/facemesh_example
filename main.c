@@ -242,7 +242,7 @@ build_pipeline (AppData *app)
     GstPad *cropped_video_sinkpad;
     GstCaps *cropped_video_caps;
     LandmarkModelInfo *info;
-    gchar *input_size, *output_size;
+    gchar *input_size, *output_size, *input_dim;
 
     info = &app->landmark_model;
 
@@ -259,6 +259,9 @@ build_pipeline (AppData *app)
     }
 
     g_object_set (tdec_flexible, "mode", "custom-code", "option1", "flexible_to_video", NULL);
+    input_dim = g_strdup_printf ("3:%d:%d", info->tensor_width, info->tensor_height);
+    g_object_set (tconv, "input-type", "uint8", "input-dim", input_dim, NULL);
+    g_free (input_dim);
     g_object_set (ttransform, "mode", 2 /* GTT_ARITHMETIC */, "option", "typecast:float32,add:-127.5,div:127.5", NULL);
     g_object_set (tfilter_landmark, "framework", "tensorflow-lite", "model", app->landmark_model.model_path, NULL);
 
@@ -280,9 +283,7 @@ build_pipeline (AppData *app)
        "height", G_TYPE_INT, info->tensor_height,
        NULL);
     if (gst_pad_link (cropped_video_srcpad, cropped_video_sinkpad) != GST_PAD_LINK_OK
-        || !gst_element_link (queue, tdec_flexible)
-        || !gst_element_link_filtered (tdec_flexible, tconv, cropped_video_caps)
-        || !gst_element_link_many (tconv, ttransform, tfilter_landmark, tdec_landmark, NULL))
+        || !gst_element_link_many (queue, tdec_flexible, tconv, ttransform, tfilter_landmark, tdec_landmark, NULL))
     {
       g_printerr ("[LANDMARK] Elements could not be linked.\n");
       gst_object_unref (app->pipeline);
@@ -426,12 +427,6 @@ cef_func_detection_to_cropinfo (void *private_data, const GstTensorFilterPropert
   return 0;
 }
 
-static size_t
-_get_video_xraw_RGB_bufsize (size_t width, size_t height)
-{
-  return (size_t)((3 * width - 1) / 4 + 1) * 4 * height;
-}
-
 int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConfig *config, void *data, GstBuffer *out_buf) {
   AppData *app = data;
   GstMapInfo out_info;
@@ -469,7 +464,7 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
   g_assert (3 == dim[0]);
   g_assert (dim[1] == dim[2]);
 
-  size_t size = _get_video_xraw_RGB_bufsize (width, height);
+  size_t size = 3 * width * height;
 
   need_alloc = (gst_buffer_get_size (out_buf) == 0);
 
@@ -495,14 +490,12 @@ int flexible_tensor_to_video (const GstTensorMemory *input, const GstTensorsConf
   for (h = 0; h < height; h++) {
     int h_inp = (int)((float)dim[2] / height * h);
     uint8_t *row_inp = inp + dim[0] * dim[1] * h_inp;
-    uint8_t *row_ptr = ptr;
     for (w = 0; w < width; w++) {
       int w_inp = (int)((float)dim[1] / width * w);
       uint8_t *pix_inp = row_inp + dim[0] * w_inp;
-      memcpy (row_ptr, pix_inp, 3);
-      row_ptr += 3;
+      memcpy (ptr, pix_inp, 3);
+      ptr += 3;
     }
-    ptr += ((3 * width - 1) / 4 + 1) * 4;
   }
 
   gst_memory_unmap (out_mem, &out_info);
