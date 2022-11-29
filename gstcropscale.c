@@ -446,6 +446,8 @@ gst_crop_scale_negotiate (GstCropScale * self)
 
     fps_n = -1;
     fps_d = -1;
+    height = 0;
+    width = 0;
 
     walk = self->collect->data;
     while (walk) {
