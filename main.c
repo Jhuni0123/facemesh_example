@@ -107,22 +107,27 @@ build_pipeline (AppData *app)
     return FALSE;
   }
 
+#define make_element_and_check(elem,factoryname,name) \
+  do { \
+    (elem) = gst_element_factory_make ((factoryname), (name)); \
+    if (!(elem)) { \
+      g_printerr ("%s could not be created.\n", (name)); \
+      gst_object_unref (app->pipeline); \
+      return FALSE; \
+    } \
+  } while (0)
+
   /* Souece video */
   {
     GstElement *video_source, *convert, *filter, *crop, *scale;
     GstCaps *video_caps;
 
-    video_source = gst_element_factory_make ("v4l2src", "video_source");
-    convert = gst_element_factory_make ("videoconvert", "convert_source");
-    filter = gst_element_factory_make ("capsfilter", "filter1");
-    crop = gst_element_factory_make ("aspectratiocrop", "crop_source");
-    scale = gst_element_factory_make ("videoscale", "scale_source");
-    tee_source = gst_element_factory_make ("tee", "tee_source");
-
-    if (!video_source || !convert || !filter || !crop || !tee_source) {
-      g_printerr ("[SOUECE] Not all elements could be created.\n");
-      return FALSE;
-    }
+    make_element_and_check (video_source, "v4l2src", "video_source");
+    make_element_and_check (convert, "videoconvert", "convert_source");
+    make_element_and_check (filter, "capsfilter", "filter1");
+    make_element_and_check (crop, "aspectratiocrop", "crop_source");
+    make_element_and_check (scale, "videoscale", "scale_source");
+    make_element_and_check (tee_source, "tee", "tee_source");
 
     g_object_set (crop, "aspect-ratio", 1, 1, NULL);
 
@@ -152,19 +157,14 @@ build_pipeline (AppData *app)
 
     info = &app->detect_model;
 
-    queue = gst_element_factory_make ("queue", "queue_detect");
-    scale = gst_element_factory_make ("videoscale", "scale_detect");
-    filter = gst_element_factory_make ("capsfilter", "filter_detect");
-    tconv = gst_element_factory_make ("tensor_converter", "tconv_detect");
-    ttransform = gst_element_factory_make ("tensor_transform", "ttransform_detect");
-    tfilter_detect = gst_element_factory_make ("tensor_filter", "tfilter_detect");
-    tfilter_cropinfo = gst_element_factory_make ("tensor_filter", "filter_cropinfo");
-    tee_cropinfo = gst_element_factory_make ("tee", "tee_cropinfo");
-
-    if (!queue || !scale || !filter || !tconv || !ttransform || !tfilter_detect || !tfilter_cropinfo || !tee_cropinfo) {
-      g_printerr ("[DETECT] Not all elements could be created.\n");
-      return FALSE;
-    }
+    make_element_and_check (queue, "queue", "queue_detect");
+    make_element_and_check (scale, "videoscale", "scale_detect");
+    make_element_and_check (filter, "capsfilter", "filter_detect");
+    make_element_and_check (tconv, "tensor_converter", "tconv_detect");
+    make_element_and_check (ttransform, "tensor_transform", "ttransform_detect");
+    make_element_and_check (tfilter_detect, "tensor_filter", "tfilter_detect");
+    make_element_and_check (tfilter_cropinfo, "tensor_filter", "filter_cropinfo");
+    make_element_and_check (tee_cropinfo, "tee", "tee_cropinfo");
 
     scale_caps = gst_caps_new_simple ("video/x-raw",
        "format", G_TYPE_STRING, "RGB",
@@ -199,18 +199,13 @@ build_pipeline (AppData *app)
     GstElement *queue_cropinfo, *queue, *tconv_src, *tcrop, *tdec_flexible, *tconv;
     gchar *input_dim;
 
-    queue_cropinfo = gst_element_factory_make ("queue", "queue_cropinfo1");
-    queue = gst_element_factory_make ("queue", "queue_cropsrc");
-    tconv_src = gst_element_factory_make ("tensor_converter", "tconv_cropsrc");
-    tcrop = gst_element_factory_make ("tensor_crop", "tcrop");
-    tdec_flexible = gst_element_factory_make ("tensor_decoder", "tdec_flexible");
-    tconv = gst_element_factory_make ("tensor_converter", "tconv_crop");
-    tee_cropped_video = gst_element_factory_make ("tee", "tee_cropped_video");
-
-    if (!queue_cropinfo || !queue || !tconv_src || !tcrop || !tdec_flexible || !tconv || !tee_cropped_video) {
-      g_printerr ("[CROP] Not all elements could be created.\n");
-      return FALSE;
-    }
+    make_element_and_check (queue_cropinfo, "queue", "queue_cropinfo1");
+    make_element_and_check (queue, "queue", "queue_cropsrc");
+    make_element_and_check (tconv_src, "tensor_converter", "tconv_cropsrc");
+    make_element_and_check (tcrop, "tensor_crop", "tcrop");
+    make_element_and_check (tdec_flexible, "tensor_decoder", "tdec_flexible");
+    make_element_and_check (tconv, "tensor_converter", "tconv_crop");
+    make_element_and_check (tee_cropped_video, "tee", "tee_cropped_video");
 
     g_object_set (tdec_flexible, "mode", "custom-code", "option1", "flexible_tensor_scale", NULL);
     input_dim = g_strdup_printf ("3:%d:%d", app->landmark_model.tensor_width, app->landmark_model.tensor_height);
@@ -241,15 +236,10 @@ build_pipeline (AppData *app)
   {
     GstElement *queue, *tdec_video, *convert, *video_sink;
 
-    queue = gst_element_factory_make ("queue", "queue_cropped_video");
-    tdec_video = gst_element_factory_make ("tensor_decoder", "tdec_video");
-    convert = gst_element_factory_make ("videoconvert", "convert_crop");
-    video_sink = gst_element_factory_make ("autovideosink", "video_sink_crop");
-
-    if (!tdec_video || !convert || !video_sink) {
-      g_printerr ("[CROPPED VIDEO] Not all elements could be created.\n");
-      return FALSE;
-    }
+    make_element_and_check (queue, "queue", "queue_cropped_video");
+    make_element_and_check (tdec_video, "tensor_decoder", "tdec_video");
+    make_element_and_check (convert, "videoconvert", "convert_crop");
+    make_element_and_check (video_sink, "autovideosink", "video_sink_crop");
 
     g_object_set (tdec_video, "mode", "direct_video", NULL);
 
@@ -275,15 +265,10 @@ build_pipeline (AppData *app)
 
     info = &app->landmark_model;
 
-    queue = gst_element_factory_make ("queue", "queue_landmark");
-    ttransform = gst_element_factory_make ("tensor_transform", "ttransform_landmark");
-    tfilter_landmark = gst_element_factory_make ("tensor_filter", "tfilter_landmark");
-    tdec_landmark = gst_element_factory_make ("tensor_decoder", "tdec_landmark");
-
-    if (!queue || !ttransform || !tfilter_landmark || !tdec_landmark) {
-      g_printerr ("[LANDMARK] Not all elements could be created.\n");
-      return FALSE;
-    }
+    make_element_and_check (queue, "queue", "queue_landmark");
+    make_element_and_check (ttransform, "tensor_transform", "ttransform_landmark");
+    make_element_and_check (tfilter_landmark, "tensor_filter", "tfilter_landmark");
+    make_element_and_check (tdec_landmark, "tensor_decoder", "tdec_landmark");
 
     g_object_set (ttransform, "mode", 2 /* GTT_ARITHMETIC */, "option", "typecast:float32,add:-127.5,div:127.5", NULL);
     g_object_set (tfilter_landmark, "framework", "tensorflow-lite", "model", app->landmark_model.model_path, NULL);
@@ -317,17 +302,12 @@ build_pipeline (AppData *app)
     GstElement *queue, *compositor, *convert, *video_sink, *queue_cropinfo, *crop_scale;
     GstPad *overray_raw_pad;
 
-    queue = gst_element_factory_make ("queue", "queue_result");
-    queue_cropinfo = gst_element_factory_make ("queue", "queue_cropinfo2");
-    compositor = gst_element_factory_make ("compositor", "compositor");
-    convert = gst_element_factory_make ("videoconvert", "convert_result");
-    video_sink = gst_element_factory_make ("autovideosink", "video_sink");
-    crop_scale = gst_element_factory_make ("crop_scale", "crop_scale");
-
-    if (!queue || !compositor || !convert || !video_sink || !queue_cropinfo || !crop_scale) {
-      g_printerr ("[RESULT] Not all elements could be created.\n");
-      return FALSE;
-    }
+    make_element_and_check (queue, "queue", "queue_result");
+    make_element_and_check (queue_cropinfo, "queue", "queue_cropinfo2");
+    make_element_and_check (compositor, "compositor", "compositor");
+    make_element_and_check (convert, "videoconvert", "convert_result");
+    make_element_and_check (video_sink, "autovideosink", "video_sink");
+    make_element_and_check (crop_scale, "crop_scale", "crop_scale");
 
     gst_bin_add_many (GST_BIN (app->pipeline), queue, compositor, convert, video_sink, queue_cropinfo, crop_scale, NULL);
     
