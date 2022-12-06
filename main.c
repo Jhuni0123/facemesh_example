@@ -275,7 +275,7 @@ build_pipeline (AppData *app)
 
     input_size = g_strdup_printf ("%d:%d", info->tensor_width, info->tensor_height);
     output_size = g_strdup_printf ("%d:%d", app->video_size, app->video_size);
-    g_object_set (tdec_landmark, "mode", "face_mesh", "option1", "mediapipe-face-mesh", "option2", output_size, "option3", input_size, NULL);
+    g_object_set (tdec_landmark, "mode", "face_landmark", "option1", "mediapipe-face-mesh", "option2", "0.9", "option3", output_size, "option4", input_size, NULL);
     g_free (input_size);
     g_free (output_size);
 
