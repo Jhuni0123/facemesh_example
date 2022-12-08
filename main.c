@@ -171,16 +171,17 @@ build_pipeline (AppData *app)
     //make_element_and_check (video_source, "v4l2src", "video_source");
     make_element_and_check (convert, "videoconvert", "convert_source");
     make_element_and_check (filter, "capsfilter", "filter1");
-    make_element_and_check (crop, "aspectratiocrop", "crop_source");
+    make_element_and_check (crop, "videocrop", "crop_source");
     make_element_and_check (scale, "videoscale", "scale_source");
     make_element_and_check (tee_source, "tee", "tee_source");
 
-    g_object_set (filesrc, "location", "video2.mp4", NULL);
+    g_object_set (filesrc, "location", "video3.mp4", NULL);
     //g_object_set (G_OBJECT (decodebin), "caps", "video/x-raw,format=RGB", NULL);
     app->convert_src = convert;
     g_signal_connect (decodebin, "pad-added", G_CALLBACK (pad_added_handler), app);
 
-    g_object_set (crop, "aspect-ratio", 1, 1, NULL);
+    //g_object_set (crop, "aspect-ratio", 1, 1, NULL);
+    g_object_set (crop, "bottom", 1936, NULL);
 
     video_caps = gst_caps_new_simple ("video/x-raw",
        "format", G_TYPE_STRING, "RGB",
