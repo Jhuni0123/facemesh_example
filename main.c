@@ -49,6 +49,7 @@ typedef struct
   guint video_size;
 
   GstElement *pipeline; /**< gst pipeline for data stream */
+  GstElement *convert_src;
 
   GMainLoop *loop; /**< main event loop */
   GstBus *bus; /**< gst bus for data pipeline */
@@ -95,6 +96,48 @@ request_compositor_and_link (GstElement *src, gchar *src_pad_name, GstElement *c
   return TRUE;
 }
 
+/* This function will be called by the pad-added signal */
+static void pad_added_handler (GstElement *src, GstPad *new_pad, AppData *data) {
+  GstPad *sink_pad = gst_element_get_static_pad (data->convert_src, "sink");
+  GstPadLinkReturn ret;
+  GstCaps *new_pad_caps = NULL;
+  GstStructure *new_pad_struct = NULL;
+  const gchar *new_pad_type = NULL;
+
+  g_print ("Received new pad '%s' from '%s':\n", GST_PAD_NAME (new_pad), GST_ELEMENT_NAME (src));
+
+  /* If our converter is already linked, we have nothing to do here */
+  if (gst_pad_is_linked (sink_pad)) {
+    g_print ("We are already linked. Ignoring.\n");
+    goto exit;
+  }
+
+  /* Check the new pad's type */
+  new_pad_caps = gst_pad_get_current_caps (new_pad);
+  new_pad_struct = gst_caps_get_structure (new_pad_caps, 0);
+  new_pad_type = gst_structure_get_name (new_pad_struct);
+  if (!g_str_has_prefix (new_pad_type, "video/x-raw")) {
+    g_print ("It has type '%s' which is not raw video. Ignoring.\n", new_pad_type);
+    goto exit;
+  }
+
+  /* Attempt the link */
+  ret = gst_pad_link (new_pad, sink_pad);
+  if (GST_PAD_LINK_FAILED (ret)) {
+    g_print ("Type is '%s' but link failed.\n", new_pad_type);
+  } else {
+    g_print ("Link succeeded (type '%s').\n", new_pad_type);
+  }
+
+exit:
+  /* Unreference the new pad's caps, if we got them */
+  if (new_pad_caps != NULL)
+    gst_caps_unref (new_pad_caps);
+
+  /* Unreference the sink pad */
+  gst_object_unref (sink_pad);
+}
+
 gboolean
 build_pipeline (AppData *app)
 {
@@ -119,15 +162,23 @@ build_pipeline (AppData *app)
 
   /* Souece video */
   {
+    GstElement *filesrc, *decodebin;
     GstElement *video_source, *convert, *filter, *crop, *scale;
     GstCaps *video_caps;
 
-    make_element_and_check (video_source, "v4l2src", "video_source");
+    make_element_and_check (filesrc, "filesrc", "filesrc");
+    make_element_and_check (decodebin, "decodebin", "decodebin");
+    //make_element_and_check (video_source, "v4l2src", "video_source");
     make_element_and_check (convert, "videoconvert", "convert_source");
     make_element_and_check (filter, "capsfilter", "filter1");
     make_element_and_check (crop, "aspectratiocrop", "crop_source");
     make_element_and_check (scale, "videoscale", "scale_source");
     make_element_and_check (tee_source, "tee", "tee_source");
+
+    g_object_set (filesrc, "location", "video2.mp4", NULL);
+    //g_object_set (G_OBJECT (decodebin), "caps", "video/x-raw,format=RGB", NULL);
+    app->convert_src = convert;
+    g_signal_connect (decodebin, "pad-added", G_CALLBACK (pad_added_handler), app);
 
     g_object_set (crop, "aspect-ratio", 1, 1, NULL);
 
@@ -139,8 +190,14 @@ build_pipeline (AppData *app)
     g_object_set (G_OBJECT (filter), "caps", video_caps, NULL);
     gst_caps_unref (video_caps);
 
-    gst_bin_add_many (GST_BIN (app->pipeline), video_source, convert, crop, scale, filter, tee_source, NULL);
-    if (!gst_element_link_many (video_source, convert, crop, scale, filter, tee_source, NULL)) {
+    //gst_bin_add_many (GST_BIN (app->pipeline), video_source, convert, crop, scale, filter, tee_source, NULL);
+    gst_bin_add_many (GST_BIN (app->pipeline), filesrc, decodebin, convert, crop, scale, filter, tee_source, NULL);
+    //if (!gst_element_link_many (video_source, convert, crop, scale, filter, tee_source, NULL)) {
+    if (!gst_element_link (filesrc, decodebin)) {
+      g_printerr ("filesrc - decodebin\n");
+      return FALSE;
+    }
+    if (!gst_element_link_many (convert, crop, scale, filter, tee_source, NULL)) {
       g_printerr ("[SOURCE] Elements could not be linked.\n");
       gst_object_unref (app->pipeline);
       return FALSE;
@@ -168,7 +225,7 @@ build_pipeline (AppData *app)
 
     scale_caps = gst_caps_new_simple ("video/x-raw",
        "format", G_TYPE_STRING, "RGB",
-       "framerate", GST_TYPE_FRACTION, 30, 1,
+       //"framerate", GST_TYPE_FRACTION, 0, 1,
        "width", G_TYPE_INT, info->tensor_width,
        "height", G_TYPE_INT, info->tensor_height,
        NULL);
@@ -383,8 +440,8 @@ cef_func_detection_to_cropinfo (void *private_data, const GstTensorFilterPropert
     //_print_log ("no detected object");
     info_data[0] = 0U;
     info_data[1] = 0U;
-    info_data[2] = info->i_width;
-    info_data[3] = info->i_height;
+    info_data[2] = 1U; //info->i_width;
+    info_data[3] = 1U; //info->i_height;
   } else {
     detectedObject *object = &g_array_index (results, detectedObject, 0);
     detectedObject margined;
@@ -595,6 +652,10 @@ message_cb (GstBus *bus, GstMessage *msg, AppData *app)
       g_printerr ("Debug information: %s\n", debug_info ? debug_info : "none");
       g_clear_error (&err);
       g_free (debug_info);
+      g_main_loop_quit (app->loop);
+      break;
+    case GST_MESSAGE_EOS:
+      g_printerr ("END OF STREAM\n");
       g_main_loop_quit (app->loop);
       break;
     default:
