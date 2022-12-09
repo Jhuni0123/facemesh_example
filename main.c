@@ -383,8 +383,8 @@ cef_func_detection_to_cropinfo (void *private_data, const GstTensorFilterPropert
     //_print_log ("no detected object");
     info_data[0] = 0U;
     info_data[1] = 0U;
-    info_data[2] = info->i_width;
-    info_data[3] = info->i_height;
+    info_data[2] = 1U; //info->i_width;
+    info_data[3] = 1U; //info->i_height;
   } else {
     detectedObject *object = &g_array_index (results, detectedObject, 0);
     detectedObject margined;
